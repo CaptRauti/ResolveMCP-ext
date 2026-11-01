@@ -18,6 +18,7 @@ folder_ops           which bin does this clip/folder live in
 photo_albums         albums, photos, ratings, flags, versions, stills
 node_graph           node labels, colours, enable state, LUTs, cache
 project_extras       render presets, audio render formats, transcription
+camera_comparison    2x2 / split layouts, camera labels, markers
 clip_position        read placement + handle offsets; flags broken APIs
 resolve_ext_status   health check
 ```
@@ -224,6 +225,38 @@ set_transcription(clip_id, transcription)  verified by reading back
 (`FLAC, MP3, MP4, MXF OP-Atom, MXF OP1A (IMF), QuickTime, Wave`) and their
 codecs. `render_presets` VERIFIED: 37 real presets.
 
+### `camera_comparison`
+
+```
+detect()                 which camera each clip is (from its name)
+grid_2x2()               four cameras in quadrants, scale 0.5
+split_h() / split_v()    two-up, side by side or stacked
+layout(assignments)      explicit {clip_id: {x, y, scale}} — fractions of raster
+fullframe(clip_ids)      back to 1.0 zoom, centred
+markers()                timeline markers naming each camera
+read()                   current transform of every clip
+```
+
+Camera detection, longest prefix first:
+
+| prefix | camera | marker |
+|---|---|---|
+| `ace*` | Insta360 AcePro | Orange |
+| `go*` | Insta360 Go Ultra | Green |
+| `luna*` | Insta360 Luna Ultra | Cyan |
+| `x*` | Insta360 X5 | Blue |
+| `vid_*` | Handy (Android file) | Gray |
+
+**Why this tool exists:** the loose scripts this replaces positioned clips
+with `SetProperty("PositionX", …)` / `"PositionY"`. MEASURED on 21.1.2.10 those
+keys return **`False` and are silently ignored** — `GetProperty` gives back
+`False` too. Zoom worked, the positioning never did. The real keys are **`Pan`**
+(x, +right) and **`Tilt`** (y, **+up**), in pixels. Every write here is read
+back, and a transform that does not stick is reported as a failure.
+
+Verified: on a 3840x2160 timeline `grid_2x2` puts AcePro at `Pan -960, Tilt
+540` (top-left) and Go Ultra at `Pan 960, Tilt 540` (top-right), read back.
+
 ### `clip_position`
 
 ```
@@ -238,7 +271,7 @@ or destructive on 21.1.2. See the next section.
 ## Measured behaviour on Resolve 21.1.2.10
 
 Everything below was measured against a live Studio build, not read from docs.
-`tests/` reproduces all of it — 86 assertions across three suites, 0 failures.
+`tests/` reproduces all of it — 120 assertions across four suites, 0 failures.
 
 **Working**
 
@@ -268,6 +301,8 @@ Everything below was measured against a live Studio build, not read from docs.
 | `Project.SetQuickExportEnabledForRenderPreset` | Same shape: `False` for a factory preset. |
 | `MediaPoolItem.SetTranscription` | Returns `False` for a PNG still **and** for a real video clip with no transcript, with both `'01:00:00:00'` and `'00:00:00:00'` start timecodes. It *replaces* a transcript, so it appears unable to create one where none exists. |
 | `MediaPoolItem.SetClipColor` (photo items) | Returned `False` for `'Sky'` on a photo album item while the colour list is documented; `ClearClipColor` works. The action reports the rejection rather than assuming success. |
+| `TimelineItem.SetProperty("PositionX"/"PositionY")` | **Silently ignored** — both the setter and the getter return `False`. Use `Pan` / `Tilt` (pixels, +x right, +y up). This is what broke the project's own grid scripts: zoom applied, positions never did. |
+| `Timeline.AddMarker` on the clip at position 0 | Cannot be placed — neither the relative frame (`0`) nor the absolute one (`StartFrame + 0`) is accepted, while every other clip answers. The tool tries both and lists the clip under `failed`. |
 
 **Gotchas**
 
@@ -289,12 +324,13 @@ Everything below was measured against a live Studio build, not read from docs.
 python tests/test_e2e.py        # core tools
 python tests/test_phase1.py     # photo albums + node graph
 python tests/test_extras.py     # render presets, audio formats, transcription
+python tests/test_camera.py     # camera layouts, labels, markers
 
 # point at your own media if ~/Pictures has fewer than 3 PNGs
 RESOLVE_EXT_TEST_MEDIA="D:/stills/*.png" python tests/test_phase1.py
 ```
 
-**86 assertions, 0 failures** against Resolve Studio 21.1.2.10.
+**120 assertions, 0 failures** against Resolve Studio 21.1.2.10.
 
 Each suite creates its own scratch project, exercises the tools and deletes it
 again — they never touch your other projects. Two habits are deliberate:

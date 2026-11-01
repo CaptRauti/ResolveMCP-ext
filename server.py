@@ -160,7 +160,54 @@ def _effect_info(eff) -> Dict[str, Any]:
 mcp = FastMCP("ResolveMCP-ext")
 
 
-# --- photo album + node graph helpers (Resolve 21.1.2) -------------------
+# --- camera comparison helpers -------------------------------------------
+
+# The camera convention used across this project's Resolve work.
+# Prefix -> (display name, marker colour). Prefixes are matched
+# case-insensitively at the START of the clip name.
+CAMERA_PREFIXES = {
+    "ace": ("Insta360 AcePro", "Orange"),
+    "go": ("Insta360 Go Ultra", "Green"),
+    "luna": ("Insta360 Luna Ultra", "Cyan"),
+    "x": ("Insta360 X5", "Blue"),
+    "vid_": ("Handy", "Gray"),
+}
+
+
+def _camera_of(clip_name: str):
+    """Map a clip name to (display_name, marker_colour) or (None, None).
+
+    Matches the longest prefix first so 'luna...' is not caught by 'l', and
+    'vid_' (an Android camera file like VID_20260614_170228.mp4) is checked
+    before the single-letter 'x'.
+    """
+    name = (clip_name or "").lower()
+    for prefix in sorted(CAMERA_PREFIXES, key=len, reverse=True):
+        if name.startswith(prefix):
+            return CAMERA_PREFIXES[prefix]
+    return None, None
+
+
+def _timeline_pixels(proj):
+    """Timeline raster as (width, height) ints, defaulting to 1920x1080."""
+    try:
+        w = int(float(proj.GetSetting("timelineResolutionWidth") or 1920))
+        h = int(float(proj.GetSetting("timelineResolutionHeight") or 1080))
+    except Exception:
+        return 1920, 1080
+    return w, h
+
+
+# 2x2 quadrant layout: name -> (x fraction of width, y fraction of height)
+# +x is right, +y is UP (verified: Tilt 540 moves the image up on a 3840x2160
+# timeline). Quadrant centres sit at +/- a quarter of each axis.
+GRID_2X2 = {
+    "ace": (-0.25, 0.25),    # top-left
+    "go": (0.25, 0.25),      # top-right
+    "luna": (-0.25, -0.25),  # bottom-left
+    "x": (0.25, -0.25),      # bottom-right
+}
+
 
 def _call_any(candidates, method: str, *args):
     """Call `method` on the first candidate that answers usefully.
@@ -2034,6 +2081,304 @@ def project_extras(action: str, params: Optional[Dict[str, Any]] = None) -> Dict
         f"Unknown action '{action}'. Use capabilities, render_presets, "
         "update_render_preset, quick_export_enable, audio_formats, "
         "audio_codecs, transcription or set_transcription."
+    )
+
+
+@mcp.tool()
+def camera_comparison(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Lay out a multi-camera comparison timeline (Insta360 grid / split views).
+
+    Reproduces the camera-comparison workflow this project has been running as
+    loose scripts, with the position bug fixed.
+
+    **The bug worth knowing:** those scripts set the image position with
+    `SetProperty("PositionX", …)` / `"PositionY"`. MEASURED on 21.1.2.10 those
+    keys return **False and are silently ignored** — `GetProperty` gives back
+    `False` too. The real keys are **`Pan`** (x, +right) and **`Tilt`** (y,
+    +up), in pixels. Zoom worked in those scripts; positioning never did. This
+    tool uses Pan/Tilt and verifies each write by reading it back.
+
+    Camera detection from the clip name, longest prefix first:
+
+      ace*   -> Insta360 AcePro       (marker Orange)
+      go*    -> Insta360 Go Ultra     (marker Green)
+      luna*  -> Insta360 Luna Ultra   (marker Cyan)
+      x*     -> Insta360 X5           (marker Blue)
+      vid_*  -> Handy                 (marker Gray)
+                 (an Android file, e.g. VID_20260614_170228.mp4)
+
+    Actions:
+      detect(track_type?, track_index?) -> {clips: [{name, id, camera}], unknown}
+        — what this timeline holds and which camera each clip is. Run this
+          first: it tells you whether the names match the convention.
+      grid_2x2(track_type?, track_index?, scale?, verify?)
+        -> {applied, skipped, layout}
+        — place the four cameras in a 2x2 quadrant grid. Quadrant centres are
+          at ±25 % of each axis; default scale 0.5.
+      split_h / split_v(track_type?, track_index?, scale?)
+        -> {applied, layout}
+        — two-up side by side (left/right) or stacked (top/bottom).
+      layout(assignments, track_type?, track_index?, scale?)
+        -> {applied, results}
+        — explicit control. assignments maps a clip_id (or camera name) to
+          {x?, y?, scale?}, where x/y are fractions of the timeline raster
+          (+x right, +y up) and scale multiplies the 1.0 zoom.
+      fullframe(clip_ids?|cameras?, track_type?, track_index?)
+        -> {reset}
+        — back to 1.0 zoom and centred, for the "phone as full picture" clip.
+      markers(track_type?, track_index?, duration_from_clip?)
+        -> {added, by_camera, markers_in_timeline, failed?}
+        — timeline markers naming each clip's camera, coloured per camera.
+          `added` and `markers_in_timeline` are both reported so the caller can
+          see they agree. LIMITATION, measured on 21.1.2.10: a marker on the
+          clip at timeline position 0 cannot be placed — neither the relative
+          frame (0) nor the absolute one (StartFrame + 0) is accepted, while
+          every other clip answers. Those clips are listed in `failed` instead
+          of being silently skipped.
+      read(track_type?, track_index?) -> {clips: [{name, camera, zoom, pan, tilt}]}
+        — the current transform of every clip, so you can see what a call did.
+
+    Everything reports what actually happened: each SetProperty is read back,
+    and a write that does not stick is counted as a failure rather than a
+    success.
+    """
+    p = params or {}
+    ctx, err = _ctx()
+    if err:
+        return err
+    _, _, proj, tl = ctx
+    if tl is None:
+        return _err("No current timeline.")
+
+    track_type = p.get("track_type", "video")
+    track_index = int(p.get("track_index", 1))
+    res_x, res_y = _timeline_pixels(proj)
+
+    def _items():
+        return tl.GetItemListInTrack(track_type, track_index) or []
+
+    def _select(ids=None, cameras=None, names=None):
+        """Pick items by id, by camera name, or by clip name."""
+        out = []
+        for it in _items():
+            n = it.GetName()
+            cam_name, _col = _camera_of(n)
+            if ids and it.GetUniqueId() in ids:
+                out.append(it)
+            elif cameras and cam_name in cameras:
+                out.append(it)
+            elif names and n in names:
+                out.append(it)
+        return out
+
+    def _apply(it, x=None, y=None, scale=None, verify=True):
+        """Set the transform, reading every write back."""
+        wrote = {}
+        if scale is not None:
+            for key in ("ZoomX", "ZoomY"):
+                try:
+                    it.SetProperty(key, float(scale))
+                    wrote[key] = it.GetProperty(key)
+                except Exception as exc:
+                    wrote[key] = f"error: {exc}"
+        if x is not None:
+            try:
+                it.SetProperty("Pan", float(x))
+                wrote["Pan"] = it.GetProperty("Pan")
+            except Exception as exc:
+                wrote["Pan"] = f"error: {exc}"
+        if y is not None:
+            try:
+                it.SetProperty("Tilt", float(y))
+                wrote["Tilt"] = it.GetProperty("Tilt")
+            except Exception as exc:
+                wrote["Tilt"] = f"error: {exc}"
+        ok = True
+        if verify:
+            for k, v in wrote.items():
+                if isinstance(v, str) or v is False:
+                    ok = False
+                if scale is not None and k.startswith("Zoom") and v != float(scale):
+                    ok = False
+        return ok, wrote
+
+    # ------------------------------------------------------------------
+    if action == "detect":
+        clips, unknown = [], []
+        for it in _items():
+            n = it.GetName()
+            cam_name, color = _camera_of(n)
+            entry = {"name": n, "id": it.GetUniqueId(), "camera": cam_name}
+            if cam_name:
+                entry["marker_color"] = color
+                clips.append(entry)
+            else:
+                unknown.append(n)
+        return _ok(clips=clips, count=len(clips), unknown=unknown,
+                   timeline=tl.GetName(), resolution=[res_x, res_y])
+
+    if action == "read":
+        out = []
+        for it in _items():
+            cam_name, _c = _camera_of(it.GetName())
+            out.append({
+                "name": it.GetName(),
+                "id": it.GetUniqueId(),
+                "camera": cam_name,
+                "zoom_x": it.GetProperty("ZoomX"),
+                "zoom_y": it.GetProperty("ZoomY"),
+                "pan": it.GetProperty("Pan"),
+                "tilt": it.GetProperty("Tilt"),
+            })
+        return _ok(clips=out, count=len(out), resolution=[res_x, res_y])
+
+    if action in ("grid_2x2", "split_h", "split_v"):
+        scale = float(p.get("scale", 0.5))
+        if action == "grid_2x2":
+            plan = GRID_2X2
+        elif action == "split_h":
+            plan = {"ace": (-0.25, 0.0), "go": (0.25, 0.0),
+                    "luna": (-0.25, 0.0), "x": (0.25, 0.0)}
+        else:
+            plan = {"ace": (0.0, 0.25), "go": (0.0, 0.25),
+                    "luna": (0.0, -0.25), "x": (0.0, -0.25)}
+
+        applied, skipped, failed = [], [], []
+        for it in _items():
+            cam_name, _c = _camera_of(it.GetName())
+            key = next((k for k, (nm, _col) in CAMERA_PREFIXES.items()
+                        if nm == cam_name), None)
+            if key is None or key not in plan:
+                skipped.append(it.GetName())
+                continue
+            fx, fy = plan[key]
+            ok, wrote = _apply(it, x=fx * res_x, y=fy * res_y, scale=scale)
+            (applied if ok else failed).append({
+                "name": it.GetName(), "camera": cam_name,
+                "requested": {"pan": fx * res_x, "tilt": fy * res_y, "scale": scale},
+                "read_back": wrote,
+            })
+        result = _ok(applied=applied, count=len(applied),
+                     layout=action, resolution=[res_x, res_y], scale=scale)
+        if skipped:
+            result["skipped"] = skipped
+        if failed:
+            result["warning"] = (
+                f"{len(failed)} clip(s) did NOT take their transform — a "
+                "SetProperty did not read back as written. See failed."
+            )
+            result["failed"] = failed
+        return result
+
+    if action == "layout":
+        assignments = p.get("assignments")
+        if not isinstance(assignments, dict) or not assignments:
+            return _err(
+                "layout needs assignments={clip_id_or_camera_name: "
+                "{x?, y?, scale?}} where x/y are fractions of the timeline "
+                "raster (+x right, +y up) and scale multiplies 1.0 zoom."
+            )
+        scale_default = float(p.get("scale", 1.0))
+        results = []
+        for target, spec in assignments.items():
+            by_id = _select(ids=[target])
+            items = by_id or _select(cameras=[target]) or _select(names=[target])
+            if not items:
+                results.append({"target": target, "error": "not found"})
+                continue
+            for it in items:
+                x = spec.get("x")
+                y = spec.get("y")
+                sc = spec.get("scale")
+                ok, wrote = _apply(
+                    it,
+                    x=x * res_x if x is not None else None,
+                    y=y * res_y if y is not None else None,
+                    scale=sc if sc is not None else scale_default,
+                )
+                results.append({
+                    "target": target, "name": it.GetName(),
+                    "success": ok, "read_back": wrote,
+                })
+        bad = [r for r in results if not r.get("success")]
+        out = _ok(results=results, applied=len(results) - len(bad))
+        if bad:
+            out["warning"] = f"{len(bad)} item(s) did not take the transform."
+        return out
+
+    if action == "fullframe":
+        targets = _select(
+            ids=p.get("clip_ids"),
+            cameras=p.get("cameras"),
+            names=p.get("names"),
+        )
+        if not targets:
+            if p.get("clip_ids") or p.get("cameras") or p.get("names"):
+                return _err("None of the given targets are on that track.")
+            return _err(
+                "fullframe needs clip_ids, cameras or names — refusing to reset "
+                "every clip in the timeline by accident."
+            )
+        results = []
+        for it in targets:
+            ok, wrote = _apply(it, x=0.0, y=0.0, scale=1.0)
+            results.append({"name": it.GetName(), "success": ok, "read_back": wrote})
+        return _ok(reset=results, count=len(results))
+
+    if action == "markers":
+        from_clip = bool(p.get("duration_from_clip", True))
+        added, by_camera, failed = 0, {}, []
+
+        def _marker_at(frame_id, color, name, note, dur):
+            """AddMarker is unreliable about the frame base — try both.
+
+            MEASURED on 21.1.2.10: a marker on the clip at timeline position 0
+            returns False when addressed relatively (frameId 0) but True when
+            addressed with the timeline's absolute start frame (86400 on a
+            timeline whose StartTimecode is 01:00:00:00). Other clips answered
+            to the relative frame. So try relative, then absolute, then report
+            the failure rather than assuming either.
+            """
+            base = int(tl.GetStartFrame() or 0)
+            for candidate, label in ((int(frame_id), "relative"),
+                                     (base + int(frame_id), "absolute")):
+                try:
+                    if tl.AddMarker(candidate, color, name, note, dur, ""):
+                        return True, label
+                except Exception:
+                    continue
+            return False, None
+
+        for it in _items():
+            name = it.GetName()
+            cam_name, color = _camera_of(name)
+            if not cam_name:
+                continue
+            dur = it.GetDuration() if from_clip else 0
+            ok, base_used = _marker_at(
+                it.GetStart(), color, cam_name,
+                f"Camera: {cam_name}\nClip: {name}", int(dur or 0),
+            )
+            if ok:
+                added += 1
+                by_camera[cam_name] = by_camera.get(cam_name, 0) + 1
+            else:
+                failed.append(name)
+
+        # Verify against the timeline's own marker list, not our counter.
+        read_back = len(tl.GetMarkers() or {})
+        out = _ok(added=added, by_camera=by_camera, markers_in_timeline=read_back)
+        if failed:
+            out["failed"] = failed
+            out["warning"] = (
+                f"{len(failed)} marker(s) could not be placed (tried both the "
+                "relative and the absolute frame). See failed."
+            )
+        return out
+
+    return _err(
+        f"Unknown action '{action}'. Use detect, grid_2x2, split_h, split_v, "
+        "layout, fullframe, markers or read."
     )
 
 
