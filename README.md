@@ -4,11 +4,11 @@ An MCP server that adds the **DaVinci Resolve 21.1.2 scripting surfaces the
 mainstream Resolve MCP servers do not cover** — clip effects, effect
 properties, Paste-Attributes, frame export and media-pool folder lookups.
 
-It is deliberately an **extension, not a replacement**: run it alongside
-[`samuelgursky/davinci-resolve-mcp`](https://github.com/samuelgursky/davinci-resolve-mcp)
-(or any other) and you get a larger surface with no overlap. Everything it
-exposes is measured against a live Resolve, and calls that turn out to be broken
-are reported as broken rather than wrapped in a success.
+It is deliberately an **extension, not a replacement**: register it alongside
+the other two Resolve MCP servers and you get a larger surface with no overlap —
+see [the full setup](#the-full-resolve-mcp-setup--three-servers-all-of-them).
+Everything it exposes is measured against a live Resolve, and calls that turn
+out to be broken are reported as broken rather than wrapped in a success.
 
 ```
 effects              apply/list/remove/toggle/reorder clip effects
@@ -22,6 +22,40 @@ camera_comparison    2x2 / split layouts, camera labels, markers
 clip_position        read placement + handle offsets; flags broken APIs
 resolve_ext_status   health check
 ```
+
+## The full Resolve MCP setup — three servers, all of them
+
+Resolve is not covered by one MCP server. **Three independent servers do
+different jobs, and full coverage means running all three.** This project is the
+third; the other two are not optional extras.
+
+| Server | Origin | Tools | What it is for |
+|---|---|---|---|
+| **Blackmagic's own**<br>`ResolveMCP.exe` | **Ships with DaVinci Resolve 21** — nothing to download | 14 | A *meta-server*: it provides Resolve's scripting-API stubs and a Python sandbox (`run_script`, `search_scripting_api`, `get_whats_new`) plus LUT/DCTL management. It performs no Resolve actions itself. |
+| **community**<br>[`samuelgursky/davinci-resolve-mcp`](https://github.com/samuelgursky/davinci-resolve-mcp) | `npx` or git | 37<br>(390 with `--full`) | The workhorse: editing, media pool, render, markers, grading, Fusion — one granular tool per task. Ships a second `davinci-resolve-advanced` server (18 Node tools) for source-safe media analysis. |
+| **this project**<br>`resolve-ext` | pip | 10 | The gaps the other two leave — see the table below. |
+
+All three talk to the same Resolve through the same **single-client** scripting
+API. They coexist without overlap; registering one and wondering why a
+capability is missing is the usual disappointment.
+
+```bash
+# 1. Blackmagic's — already on disk, just register it:
+#    %ProgramFiles%\Blackmagic Design\DaVinci Resolve\ResolveMCP.exe   (Windows)
+#    /Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Applications/ResolveMCP
+#    /opt/resolve/bin/ResolveMCP                                       (Linux)
+
+# 2. the community server (use --clients manual when driving it non-interactively):
+npx davinci-resolve-mcp setup
+
+# 3. this project:
+pip install https://github.com/CaptRauti/ResolveMCP-ext/releases/download/v1.0.0/resolve_ext-1.0.0-py3-none-any.whl
+resolve-ext doctor
+```
+
+Full procedure, per-platform paths, the Windows "Resolve is on another drive"
+case, and the failure modes of each: **[AGENTS.md](AGENTS.md)** — written so an
+AI agent can install all three unattended.
 
 ## Why this exists
 

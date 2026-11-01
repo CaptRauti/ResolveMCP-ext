@@ -8,11 +8,141 @@ See [README.md](README.md) for the human-facing documentation.
 ## What this is
 
 `resolve-ext` is an MCP server that adds DaVinci Resolve scripting surfaces the
-mainstream Resolve MCP servers do not implement. It is a **companion** server,
-not a replacement: it runs alongside another Resolve MCP server without
-overlap, so install it *in addition to* whatever the user already has.
+other Resolve MCP servers do not implement. It is a **companion**, not a
+replacement: it runs alongside the others without overlap.
 
 Ten tools, one entry point, pure Python. No compiled parts.
+
+### The Resolve MCP landscape — three servers, no overlap
+
+Before installing anything, understand that Resolve is covered by three
+independent servers that do different jobs. A user who wants **full coverage
+needs all three**; installing one and finding a capability missing is the usual
+disappointment.
+
+| Server | Where it comes from | Tools | What it is for |
+|---|---|---|---|
+| **Blackmagic's own** (`ResolveMCP.exe`) | **Ships with DaVinci Resolve 21** — nothing to download | 14 | A *meta-server*: it hands the agent Resolve's scripting-API stubs and a Python sandbox (`run_script`, `search_scripting_api`, `get_whats_new`), plus LUT/DCTL management. It writes no Resolve actions itself. |
+| **community** (`samuelgursky/davinci-resolve-mcp`) | npm or git | 37 (390 with `--full`) | The workhorse: granular tools for editing, media pool, render, markers, grading, Fusion. Plus a second `davinci-resolve-advanced` server (18 Node tools) for source-safe media analysis. |
+| **this project** (`resolve-ext`) | pip | 10 | The gaps the other two leave: clip effects and their properties, Paste Attributes, frame export, photo albums, node-graph labelling, and the multi-camera comparison layouts. |
+
+They coexist. All three talk to the same Resolve through the same scripting API,
+which is **single-client** — so register them together, but know they share one
+Resolve.
+
+Do not install one and present it as the whole picture. If the user asks for
+"the Resolve MCP", ask which of these they mean, or install all three.
+
+---
+
+## Full setup — install all three
+
+Do these in order. Steps 1 and 2 are independent; step 3 assumes step 2 exists,
+because `resolve-ext` is a companion.
+
+### Server 1 — Blackmagic's own: nothing to install
+
+It is already on disk wherever DaVinci Resolve 21 is installed. Just register it:
+
+| Platform | Path to the server |
+|---|---|
+| Windows | `%ProgramFiles%\Blackmagic Design\DaVinci Resolve\ResolveMCP.exe` |
+| macOS | `/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Applications/ResolveMCP` |
+| macOS (App Store build) | `/Applications/DaVinci Resolve Studio.app/Contents/Applications/ResolveMCP` |
+| Linux | `/opt/resolve/bin/ResolveMCP` |
+
+```json
+{
+  "mcpServers": {
+    "bmd-native": {
+      "command": "C:\\Program Files\\Blackmagic Design\\DaVinci Resolve\\ResolveMCP.exe"
+    }
+  }
+}
+```
+
+On Windows the installer lets the user choose any directory — including another
+drive — so `%ProgramFiles%` is only a guess. Do not hard-code it. Either query
+the real location, or set the override the server itself honours:
+
+```bash
+# Ask Windows where Resolve actually lives (the .drp file association):
+reg query "HKCR\ResolveDrpFile\shell\open\command" /ve
+# → (Default) REG_SZ "D:\Blackmagic Design\DaVinci Resolve\Resolve.exe" "%1"
+```
+
+Rounding that value up to its directory and appending `ResolveMCP.exe` gives
+the real path. `RESOLVE_MCP_PATH` overrides everything if the user wants it
+elsewhere.
+
+Verify before registering — the binary has its own CLI:
+
+```bash
+"<path>/ResolveMCP.exe" --dump-tools      # prints its tool definitions and exits
+"<path>/ResolveMCP.exe" --test            # performs an init handshake and exits
+```
+
+**Do not read a `Traceback ... ImportError: DLL load failed while importing
+fusionscript` as "broken".** That is the server failing to find Resolve's
+library; it says nothing about the installation. `--dump-tools` works
+regardless, and the server connects normally when launched from a client with a
+normal environment. On Windows, `%ProgramFiles%` and the file-association check
+above are the reliable way to the binary.
+
+**Claude Desktop users have a shortcut:** Blackmagic also ships
+`DaVinciResolve.mcpb` in the same directory. That is an MCP bundle — opening it
+installs and configures the server for Claude Desktop in one step. It is a Node
+wrapper (needs Node ≥18) that spawns the same binary lazily. Prefer it over
+hand-editing the config when the client supports bundles.
+
+### Server 2 — the community server
+
+```bash
+npx davinci-resolve-mcp setup
+```
+
+The npm package is a bootstrapper: it finds Resolve, creates a managed virtual
+environment, and can configure the client itself. For a checkout instead:
+
+```bash
+git clone https://github.com/samuelgursky/davinci-resolve-mcp.git
+cd davinci-resolve-mcp
+python install.py --clients manual        # print the config, write nothing
+```
+
+**When driving this non-interactively, always use `--clients manual` or
+`--dry-run`.** Bare `install.py` prompts, and a prompt inside an agent run
+hangs. Useful flags: `--clients <id,id|all|manual>`, `--dry-run`, `--no-venv`,
+`--server`, `--python`, `--update-policy never`.
+
+`--clients manual` prints working config for *this* machine, including the
+second `davinci-resolve-advanced` server. Register what it prints rather than
+composing the entry by hand.
+
+Note the installer's own warning: a Python newer than 3.12 may fail to connect
+(`scriptapp("Resolve")` returns `None`). If that happens, install Python 3.10–3.12
+and re-run against it.
+
+### Server 3 — this project
+
+See **Install — the whole procedure** below. Short version:
+
+```bash
+pip install https://github.com/CaptRauti/ResolveMCP-ext/releases/download/v1.0.0/resolve_ext-1.0.0-py3-none-any.whl
+resolve-ext doctor        # exit 0 before you register it
+```
+
+### Finally — check all three are live
+
+Reload the client's MCP connections, then confirm the tools from each are
+present. The three name-spaces are distinguishable at a glance:
+
+- from this project — `resolve_ext_status`, `camera_comparison`, `node_graph`, …
+- from the community server — `timeline`, `media_pool`, `project`, …
+- from Blackmagic — `run_script`, `search_scripting_api`, `get_whats_new`, …
+
+If a whole group is missing, that server is not registered — not a bug in the
+others.
 
 ---
 
@@ -137,6 +267,11 @@ If fewer appear, the registration is wrong — not the server. Re-run
 | `ModuleNotFoundError: server` after install | Older release | Reinstall from `v1.0.0` or later |
 | Tools do not appear in the client after registering | Nested `mcpServers`, or the client was not reloaded | Flatten the config; reload MCP connections |
 | `mcp` 2.x import error | An unpinned `mcp` | The pin `<2` ships in the package metadata; reinstall the package rather than upgrading `mcp` |
+| Blackmagic server: `ImportError: DLL load failed while importing fusionscript` | It cannot find Resolve's library in that environment | Not a broken install — `--dump-tools` still works and it connects from a client. Check the path is right and Resolve is running |
+| Blackmagic server: no tools at all in the client | `%ProgramFiles%` was assumed, but Resolve is on another drive | Resolve the real path via `HKCR\ResolveDrpFile\shell\open\command`, or set `RESOLVE_MCP_PATH` |
+| Community server: connects but `scriptapp("Resolve")` returns `None` | Python newer than 3.12 | Install Python 3.10–3.12 and re-run `install.py` with `--python` |
+| Community `install.py` never returns | It is prompting | Never call it bare; use `--clients manual` or `--dry-run` |
+| Only some of the three servers' tools are present | That is normal until all three are registered | They are separate servers; see "Full setup" |
 
 Resolve's scripting API is **single-client**: only one instance of Resolve can
 serve it at a time. Two MCP servers can both be registered, but they talk to
