@@ -154,6 +154,39 @@ names = [v.get("name") for v in mk.values() if isinstance(v, dict)]
 check("Marker tragen Kamera-Namen", all(n in names for n in
       ("Insta360 Go Ultra", "Insta360 Luna Ultra", "Insta360 X5")), str(names))
 
+print("\n=== sort_to_bins ===")
+r = show("sort_to_bins", S.camera_comparison("sort_to_bins", {}), 400)
+check("alle 4 Clips einsortiert", (r.get("total") or 0) == 4, str(r.get("moved")))
+check("4 Bins angelegt", len(r.get("bins") or {}) == 4, str(r.get("bins")))
+check("kein Fehler gemeldet", "failed" not in r, str(r.get("failed")))
+# Readback: liegen die Clips WIRKLICH in den Bins?
+root = mp.GetRootFolder()
+bin_names = {f.GetName(): f for f in (root.GetSubFolderList() or [])}
+check("Bins existieren im Media Pool", len(bin_names) >= 4, str(sorted(bin_names)))
+total_in_bins = sum(len(f.GetClipList() or []) for f in bin_names.values())
+check("Clips liegen wirklich in den Bins (nicht nur gemeldet)",
+      total_in_bins == 4, f"{total_in_bins} Clips in Bins")
+# Timelines show up in GetClipList() too, so check for the camera CLIPS.
+root_left = [c.GetName() for c in (root.GetClipList() or [])
+             if S._camera_of(c.GetName())[0]]
+check("keine Kamera-Clips mehr im Root", not root_left, str(root_left))
+
+print("\n=== build_timeline ===")
+r = show("build_timeline", S.camera_comparison("build_timeline", {"name": "ZZ_SyncTest"}), 380)
+check("Timeline gebaut", "error" not in r, str(r.get("error"))[:80])
+check("4 Clips platziert", r.get("placed") == 4, str(r.get("placed")))
+check("4 Tracks (eine pro Kamera)", r.get("tracks") == 4, str(r.get("tracks")))
+check("1 Szene", r.get("scenes") == 1, str(r.get("scenes")))
+# Readback auf der neuen Timeline
+ntl = proj.GetCurrentTimeline()
+if ntl:
+    counts = {v: len(ntl.GetItemListInTrack("video", v) or []) for v in (1, 2, 3, 4)}
+    check("jeder Track hat genau 1 Clip", all(c == 1 for c in counts.values()), str(counts))
+    starts = [i.GetStart() for v in (1, 2, 3, 4)
+              for i in (ntl.GetItemListInTrack("video", v) or [])]
+    check("alle Clips starten synchron auf demselben Frame",
+          len(set(starts)) == 1 and starts, f"starts={sorted(set(starts))}")
+
 print("\n=== Aufraeumen ===")
 pm.CloseProject(proj)
 check("Testprojekt geloescht", bool(pm.DeleteProject("ZZ_Cam")))

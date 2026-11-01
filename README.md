@@ -234,6 +234,8 @@ split_h() / split_v()    two-up, side by side or stacked
 layout(assignments)      explicit {clip_id: {x, y, scale}} — fractions of raster
 fullframe(clip_ids)      back to 1.0 zoom, centred
 markers()                timeline markers naming each camera
+sort_to_bins()           file clips into per-camera bins by name
+build_timeline()         one video track per camera, scenes synced
 read()                   current transform of every clip
 ```
 
@@ -271,7 +273,7 @@ or destructive on 21.1.2. See the next section.
 ## Measured behaviour on Resolve 21.1.2.10
 
 Everything below was measured against a live Studio build, not read from docs.
-`tests/` reproduces all of it — 120 assertions across four suites, 0 failures.
+`tests/` reproduces all of it — 132 assertions across four suites, 0 failures.
 
 **Working**
 
@@ -301,8 +303,10 @@ Everything below was measured against a live Studio build, not read from docs.
 | `Project.SetQuickExportEnabledForRenderPreset` | Same shape: `False` for a factory preset. |
 | `MediaPoolItem.SetTranscription` | Returns `False` for a PNG still **and** for a real video clip with no transcript, with both `'01:00:00:00'` and `'00:00:00:00'` start timecodes. It *replaces* a transcript, so it appears unable to create one where none exists. |
 | `MediaPoolItem.SetClipColor` (photo items) | Returned `False` for `'Sky'` on a photo album item while the colour list is documented; `ClearClipColor` works. The action reports the rejection rather than assuming success. |
+| `Folder.AddSubFolder` / `Folder.MoveClips` | Do not exist. Both live on **MediaPool** (`mp.AddSubFolder(parent, name)`, `mp.MoveClips(clips, folder)`) — verified that `MoveClips` really relocates the clip and returns `True`, not a false success. Same object-split as the photo-album API. |
 | `TimelineItem.SetProperty("PositionX"/"PositionY")` | **Silently ignored** — both the setter and the getter return `False`. Use `Pan` / `Tilt` (pixels, +x right, +y up). This is what broke the project's own grid scripts: zoom applied, positions never did. |
 | `Timeline.AddMarker` on the clip at position 0 | Cannot be placed — neither the relative frame (`0`) nor the absolute one (`StartFrame + 0`) is accepted, while every other clip answers. The tool tries both and lists the clip under `failed`. |
+| `AppendToTimeline` with `startFrame` == `endFrame` | Returns `None` and places nothing. With single-frame media (`GetClipProperty("Frames") == "1"`) the natural `endFrame` is `0`, so a "correct" 0..0 range silently fails. Omitting `endFrame` lets Resolve use the whole clip and works. |
 
 **Gotchas**
 
@@ -330,7 +334,7 @@ python tests/test_camera.py     # camera layouts, labels, markers
 RESOLVE_EXT_TEST_MEDIA="D:/stills/*.png" python tests/test_phase1.py
 ```
 
-**120 assertions, 0 failures** against Resolve Studio 21.1.2.10.
+**132 assertions, 0 failures** against Resolve Studio 21.1.2.10.
 
 Each suite creates its own scratch project, exercises the tools and deletes it
 again — they never touch your other projects. Two habits are deliberate:

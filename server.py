@@ -2135,8 +2135,25 @@ def camera_comparison(action: str, params: Optional[Dict[str, Any]] = None) -> D
           frame (0) nor the absolute one (StartFrame + 0) is accepted, while
           every other clip answers. Those clips are listed in `failed` instead
           of being silently skipped.
+      sort_to_bins(folder_name?, recursive?, prefix?)
+        -> {moved, bins, skipped}
+        — file clips into per-camera bins by their name prefix. `folder_name`
+          names an existing folder to sort inside; without it the media pool
+          root is used. Bins are created on demand.
+      build_timeline(name?, cameras?, scene_gap_frames?, sync_at?)
+        -> {timeline, placed, by_camera}
+        — build the multi-track comparison: one video track per camera, each
+          scene's clips stacked at the same frame so they play side by side.
+          `cameras` limits which cameras take part. `scene_gap_frames`
+          (default 0) inserts a gap between scenes; `sync_at` (default 0) is
+          the frame the first scene starts on.
       read(track_type?, track_index?) -> {clips: [{name, camera, zoom, pan, tilt}]}
         — the current transform of every clip, so you can see what a call did.
+
+    Note on the media-pool API, measured: AddSubFolder and MoveClips live on
+    **MediaPool**, not on Folder — `Folder.AddSubFolder` and `Folder.MoveClips`
+    do not exist (the same split as the photo-album API). MoveClips was
+    verified to actually relocate the clip, not merely return True.
 
     Everything reports what actually happened: each SetProperty is read back,
     and a write that does not stick is counted as a failure rather than a
@@ -2147,6 +2164,7 @@ def camera_comparison(action: str, params: Optional[Dict[str, Any]] = None) -> D
     if err:
         return err
     _, _, proj, tl = ctx
+    mp = proj.GetMediaPool()
     if tl is None:
         return _err("No current timeline.")
 
@@ -2376,9 +2394,210 @@ def camera_comparison(action: str, params: Optional[Dict[str, Any]] = None) -> D
             )
         return out
 
+    if action == "sort_to_bins":
+        recursive = bool(p.get("recursive", True))
+        wanted = p.get("folder_name")
+        prefix_filter = p.get("prefix")
+
+        # locate the folder to sort within (default: media-pool root)
+        target_folder = None
+        root = mp.GetRootFolder()
+        if wanted:
+            def _walk(f):
+                if f.GetName() == wanted:
+                    return f
+                for sub in (f.GetSubFolderList() or []):
+                    hit = _walk(sub)
+                    if hit:
+                        return hit
+                return None
+            target_folder = _walk(root)
+            if not target_folder:
+                return _err(f"No media pool folder named '{wanted}'.")
+        else:
+            target_folder = root
+
+        # collect clips
+        clips = []
+        def _collect(f):
+            clips.extend(f.GetClipList() or [])
+            if recursive:
+                for sub in (f.GetSubFolderList() or []):
+                    _collect(sub)
+        _collect(target_folder)
+        if prefix_filter:
+            clips = [c for c in clips if c.GetName().lower().startswith(prefix_filter.lower())]
+        if not clips:
+            return _ok(moved=0, bins={}, note=f"No clips found in '{target_folder.GetName()}'.")
+
+        # group by camera
+        groups = {}
+        skipped = []
+        for c in clips:
+            cam_name, _col = _camera_of(c.GetName())
+            if cam_name:
+                groups.setdefault(cam_name, []).append(c)
+            else:
+                skipped.append(c.GetName())
+
+        # create/find a bin per camera. AddSubFolder lives on MediaPool.
+        add_sub = getattr(mp, "AddSubFolder", None)
+        if add_sub is None:
+            return _err("This build does not expose MediaPool.AddSubFolder.")
+        existing = {f.GetName(): f for f in (target_folder.GetSubFolderList() or [])}
+
+        moved, bins, failures = {}, {}, []
+        for cam_name, items in groups.items():
+            bin_name = p.get("bin_prefix", "") + cam_name
+            folder = existing.get(bin_name)
+            if folder is None:
+                try:
+                    folder = add_sub(target_folder, bin_name)
+                except Exception as exc:
+                    failures.append(f"{bin_name}: {exc}")
+                    continue
+                if not folder:
+                    failures.append(f"{bin_name}: AddSubFolder returned nothing")
+                    continue
+                existing[bin_name] = folder
+            # MoveClips is on the MediaPool proxy, not on the folder.
+            try:
+                ok = mp.MoveClips(items, folder)
+            except Exception as exc:
+                failures.append(f"{bin_name}: {exc}")
+                continue
+            if not ok:
+                failures.append(f"{bin_name}: MoveClips returned False")
+                continue
+            # verify by reading the bin back rather than trusting the return
+            landed = len(folder.GetClipList() or [])
+            if landed < len(items):
+                failures.append(
+                    f"{bin_name}: MoveClips reported success but the bin holds "
+                    f"{landed} of {len(items)} clips")
+            moved[cam_name] = len(items)
+            bins[bin_name] = landed
+
+        out = _ok(moved=moved, bins=bins,
+                  total=sum(moved.values()),
+                  source=target_folder.GetName())
+        if skipped:
+            out["skipped"] = skipped
+        if failures:
+            out["failed"] = failures
+            out["warning"] = f"{len(failures)} bin(s) reported a problem."
+        return out
+
+    if action == "build_timeline":
+        import re as _re
+
+        tl_name = p.get("name") or "Camera Comparison"
+        want_cams = p.get("cameras")
+        gap = int(p.get("scene_gap_frames", 0) or 0)
+        sync_at = int(p.get("sync_at", 0) or 0)
+
+        root = mp.GetRootFolder()
+        found = []
+        def _collect(f):
+            found.extend(f.GetClipList() or [])
+            for sub in (f.GetSubFolderList() or []):
+                _collect(sub)
+        _collect(root)
+        if not found:
+            return _err("No clips in the media pool to build a timeline from.")
+
+        # camera -> scene number -> clip. The naming convention is
+        # <prefix><scene>, e.g. ace1/go1/luna2/x3.
+        plan = {}
+        ignored = []
+        for c in found:
+            name = c.GetName()
+            cam_name, _col = _camera_of(name)
+            if not cam_name or (want_cams and cam_name not in want_cams):
+                ignored.append(name)
+                continue
+            m = _re.match(r"^[a-z_]+?(\d+)", name.lower())
+            scene = int(m.group(1)) if m else 1
+            plan.setdefault(cam_name, {}).setdefault(scene, []).append(c)
+
+        if not plan:
+            return _err(
+                "No clips matched the camera convention. The names must start "
+                "with ace/go/luna/x/vid_ (see the prefix table)."
+            )
+
+        # order cameras longest prefix first so the tracks are deterministic
+        order = [c for c in ("Insta360 AcePro", "Insta360 Go Ultra",
+                             "Insta360 Luna Ultra", "Insta360 X5", "Handy")
+                 if c in plan]
+        scenes = sorted({s for cam in plan.values() for s in cam})
+        if len(order) > 2:
+            tl = mp.CreateEmptyTimeline(tl_name)
+            if not tl:
+                return _err(f"Could not create timeline '{tl_name}' (name in use?).")
+            proj.SetCurrentTimeline(tl)
+            tl = proj.GetCurrentTimeline()
+            # ensure a video track per camera: a new timeline ships with one.
+            for _ in range(len(order) - 1):
+                tl.AddTrack("video")
+        else:
+            tl = mp.CreateEmptyTimeline(tl_name)
+            if not tl:
+                return _err(f"Could not create timeline '{tl_name}' (name in use?).")
+            proj.SetCurrentTimeline(tl)
+            tl = proj.GetCurrentTimeline()
+
+        placed, by_camera = 0, {}
+        skipped_clips = []
+        for scene in scenes:
+            # The longest clip of the scene decides the slot length.
+            scene_clips = [c for cam in order if scene in plan.get(cam, {})
+                           for c in plan[cam][scene]]
+            if not scene_clips:
+                continue
+            slot = 1
+            for c in scene_clips:
+                try:
+                    slot = max(slot, int(c.GetClipProperty("Frames") or 1))
+                except Exception:
+                    pass
+            record = sync_at
+            for track_idx, cam in enumerate(order, start=1):
+                for c in plan.get(cam, {}).get(scene, []):
+                    # No endFrame: Resolve then uses the whole clip. Passing one
+                    # breaks single-frame media — with Frames=1 the natural
+                    # endFrame is 0, and AppendToTimeline(0..0) returns None
+                    # (measured; omitting the key places the clip fine).
+                    placed_ok = mp.AppendToTimeline([{
+                        "mediaPoolItem": c,
+                        "startFrame": 0,
+                        "trackIndex": track_idx,
+                        "recordFrame": record,
+                    }])
+                    if placed_ok:
+                        placed += 1
+                        by_camera[cam] = by_camera.get(cam, 0) + 1
+                    else:
+                        skipped_clips.append(
+                            f"{c.GetName()} (track {track_idx}, frame {record})")
+            sync_at = record + slot + gap
+
+        out = _ok(timeline=tl.GetName(), placed=placed, by_camera=by_camera,
+                  tracks=len(order), scenes=len(scenes))
+        if ignored:
+            out["ignored"] = ignored[:20]
+            out["ignored_count"] = len(ignored)
+        if skipped_clips:
+            out["not_placed"] = skipped_clips[:20]
+            out["warning"] = (
+                f"{len(skipped_clips)} clip(s) could not be placed — "
+                "AppendToTimeline returned nothing for them."
+            )
+        return out
+
     return _err(
         f"Unknown action '{action}'. Use detect, grid_2x2, split_h, split_v, "
-        "layout, fullframe, markers or read."
+        "layout, fullframe, markers, sort_to_bins, build_timeline or read."
     )
 
 
