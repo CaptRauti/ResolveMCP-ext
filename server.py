@@ -1,14 +1,18 @@
 """resolve-ext — DaVinci Resolve MCP extension server.
 
-Fills the 21.1.2 gaps that samuelgursky/davinci-resolve-mcp v4.18.2 does not
-cover: clip effects, effect properties, attribute copying, and (in later
-releases) clip repositioning and frame export.
+Fills the 21.1.2 gaps that the mainstream Resolve MCP servers do not cover:
+clip effects, effect properties, Paste-Attributes, frame export, folder
+lookups, photo albums, node-graph labelling and the camera-comparison layout
+workflow.
 
-Lives OUTSIDE the upstream checkout on purpose: `git pull` there can never
-overwrite this. It talks to Resolve through the same external scripting API.
+Deliberately an extension, not a fork: nothing here duplicates another
+server's surface, so both run side by side.
 
 Run:
-    python server.py            # stdio MCP server
+    resolve-ext              # stdio MCP server
+    resolve-ext doctor       # check this machine's Resolve setup
+    resolve-ext env          # print the env vars an MCP client needs
+    resolve-ext --version
 """
 
 from __future__ import annotations
@@ -16,6 +20,248 @@ from __future__ import annotations
 import os
 import sys
 from typing import Any, Dict, List, Optional
+
+__version__ = "1.0.0"
+
+# --- locating DaVinci Resolve --------------------------------------------
+#
+# The scripting API lives in a different place on every platform, and getting
+# it wrong is the single most common installation failure. These paths mirror
+# what Blackmagic documents and what the mainstream server's platform module
+# resolves; an explicit environment variable always wins, because Resolve is
+# routinely installed somewhere non-standard.
+
+MACOS_API_CANDIDATES = (
+    "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting",
+    "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Developer/Scripting",
+)
+
+
+def find_resolve_paths() -> Dict[str, Optional[str]]:
+    """Locate the Resolve scripting API for this platform.
+
+    Returns {"api_path", "lib_path", "modules_path", "platform"}; any value may
+    be None when nothing was found, so callers can report precisely which piece
+    is missing rather than failing with a bare ImportError.
+    """
+    import platform as _platform
+
+    system = _platform.system().lower()
+
+    if system == "darwin":
+        name = "macos"
+        api = next((p for p in MACOS_API_CANDIDATES if os.path.isdir(p)),
+                   MACOS_API_CANDIDATES[0])
+        lib = ("/Applications/DaVinci Resolve/DaVinci Resolve.app/"
+               "Contents/Libraries/Fusion/fusionscript.so")
+    elif system == "windows":
+        name = "windows"
+        programdata = os.environ.get("PROGRAMDATA", r"C:\ProgramData")
+        programfiles = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+        api = os.path.join(programdata, "Blackmagic Design", "DaVinci Resolve",
+                           "Support", "Developer", "Scripting")
+        lib = os.path.join(programfiles, "Blackmagic Design", "DaVinci Resolve",
+                           "fusionscript.dll")
+    elif system == "linux":
+        name = "linux"
+        api = "/opt/resolve/Developer/Scripting"
+        lib = "/opt/resolve/libs/fusionscript.so"
+    else:
+        name = system or "unknown"
+        api = lib = None
+
+    # An explicit override wins — but only when it exists, so a stale variable
+    # does not mask a working default.
+    env_api = os.environ.get("RESOLVE_SCRIPT_API")
+    if env_api and os.path.isdir(env_api):
+        api = env_api
+    env_lib = os.environ.get("RESOLVE_SCRIPT_LIB")
+    if env_lib and os.path.isfile(env_lib):
+        lib = env_lib
+
+    return {
+        "platform": name,
+        "api_path": api,
+        "lib_path": lib,
+        "modules_path": os.path.join(api, "Modules") if api else None,
+        "api_exists": bool(api and os.path.isdir(api)),
+        "lib_exists": bool(lib and os.path.isfile(lib)),
+    }
+
+
+def apply_resolve_env(verbose: bool = False) -> Dict[str, Optional[str]]:
+    """Set RESOLVE_SCRIPT_API / RESOLVE_SCRIPT_LIB / PYTHONPATH if they are unset.
+
+    Existing values are never overwritten, so a user who has configured their
+    environment keeps full control.
+    """
+    paths = find_resolve_paths()
+    if paths.get("api_path") and not os.environ.get("RESOLVE_SCRIPT_API"):
+        os.environ["RESOLVE_SCRIPT_API"] = paths["api_path"]
+    if paths.get("lib_path") and not os.environ.get("RESOLVE_SCRIPT_LIB"):
+        os.environ["RESOLVE_SCRIPT_LIB"] = paths["lib_path"]
+    mods = paths.get("modules_path")
+    if mods and os.path.isdir(mods) and mods not in sys.path:
+        sys.path.append(mods)
+    if verbose:
+        print(f"platform      {paths['platform']}")
+        print(f"api_path      {paths['api_path']}  "
+              f"({'found' if paths['api_exists'] else 'MISSING'})")
+        print(f"lib_path      {paths['lib_path']}  "
+              f"({'found' if paths['lib_exists'] else 'MISSING'})")
+    return paths
+
+
+def doctor() -> int:
+    """Report whether this machine can talk to Resolve. Returns an exit code."""
+    print(f"resolve-ext {__version__}\n")
+    print("--- Python ---")
+    print(f"  {sys.version.split()[0]} at {sys.executable}")
+    if sys.version_info < (3, 10):
+        print("  ERROR: Python 3.10 or newer is required.")
+        return 2
+    print("  ok (3.10+)")
+
+    print("\n--- DaVinci Resolve scripting API ---")
+    paths = apply_resolve_env(verbose=True)
+    problems = []
+    if not paths["api_exists"]:
+        problems.append(
+            f"API folder not found at {paths['api_path']}.\n"
+            "      DaVinci Resolve (Studio) must be installed, and external\n"
+            "      scripting enabled: Preferences > System > General >\n"
+            "      External scripting using > Local."
+        )
+    if not paths["lib_exists"]:
+        problems.append(f"library not found at {paths['lib_path']}")
+    if paths["api_exists"] and paths["modules_path"] and \
+            not os.path.isdir(paths["modules_path"]):
+        problems.append(f"Modules folder missing at {paths['modules_path']}")
+
+    print("\n--- Import test ---")
+    try:
+        apply_resolve_env()
+        import DaVinciResolveScript  # noqa: F401
+        print("  ok: DaVinciResolveScript imports")
+    except Exception as exc:
+        problems.append(f"DaVinciResolveScript does not import: {exc}")
+        print(f"  FAILED: {exc}")
+
+    print("\n--- Live connection ---")
+    try:
+        app = _connect()
+        if app:
+            proj = app.GetProjectManager().GetCurrentProject()
+            print(f"  ok: connected to Resolve; project = "
+                  f"{proj.GetName() if proj else 'none open'}")
+        else:
+            problems.append(
+                "Resolve is installed but not reachable. Start DaVinci Resolve "
+                "Studio, and enable Preferences > System > General > "
+                "External scripting using > Local."
+            )
+            print("  FAILED: no running Resolve instance answered")
+    except Exception as exc:
+        problems.append(f"connection failed: {exc}")
+        print(f"  FAILED: {exc}")
+
+    print("\n--- Result ---")
+    if not problems:
+        print("  All checks passed. This machine can run resolve-ext.")
+        print("\n  Register it with your MCP client using the values from:")
+        print("      resolve-ext env")
+        return 0
+    print(f"  {len(problems)} problem(s):")
+    for i, p in enumerate(problems, 1):
+        print(f"    {i}. {p}")
+    return 1
+
+
+def print_env() -> int:
+    """Print the env block an MCP client needs, for this machine."""
+    import json as _json
+    import shutil as _shutil
+
+    paths = find_resolve_paths()
+
+    # Prefer the installed console script: it survives a Python upgrade and
+    # does not hard-code a site-packages path. Fall back to the module path
+    # when running from a checkout that was never installed.
+    script = _shutil.which("resolve-ext")
+    if script:
+        command, args = script, []
+        how = "installed console script"
+    else:
+        command, args = sys.executable, [os.path.abspath(__file__)]
+        how = "running from source (pip install . gives you a cleaner command)"
+
+    print(f"# resolve-ext {__version__} on {paths['platform']}")
+    print(f"# entry point: {how}\n")
+
+    env_block = {
+        "RESOLVE_SCRIPT_API": paths["api_path"],
+        "RESOLVE_SCRIPT_LIB": paths["lib_path"],
+        "PYTHONPATH": paths["modules_path"],
+    }
+    # These are set automatically by the server when it can find the paths
+    # itself — measured working with no environment at all. Pass them
+    # explicitly only when Resolve lives somewhere non-standard.
+    server = {"command": command}
+    if args:
+        server["args"] = args
+    print("# Register the server (the env block is optional when Resolve is")
+    print("# installed in its default location — the server finds it itself):")
+    print(_json.dumps({"mcpServers": {"resolve-ext": server}}, indent=2))
+
+    print("\n# With the env block made explicit:")
+    server["env"] = env_block
+    print(_json.dumps({"mcpServers": {"resolve-ext": server}}, indent=2))
+
+    print("\n# Or with the Hermes CLI:")
+    joined = " \\\n#      ".join(f'--env "{k}={v}"' for k, v in env_block.items())
+    print("#    hermes mcp add resolve-ext \\")
+    print(f"#      --command \"{command}\" \\")
+    print(f"#      {joined} \\")
+    if args:
+        print(f"#      --args \"{args[0]}\"")
+    else:
+        print("#      --args \"\"   # the console script needs no argument")
+    return 0
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """CLI entry point: run the server, or one of the helper commands."""
+    args = list(sys.argv[1:] if argv is None else argv)
+
+    if args and args[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        print("Commands:")
+        print("  (none)     run the MCP server over stdio")
+        print("  doctor     check this machine's Resolve setup")
+        print("  env        print the env block an MCP client needs")
+        print("  --version  print the version")
+        return 0
+
+    if args and args[0] in ("--version", "-V", "version"):
+        print(f"resolve-ext {__version__}")
+        return 0
+
+    if args and args[0] == "doctor":
+        return doctor()
+
+    if args and args[0] == "env":
+        return print_env()
+
+    if args:
+        print(f"resolve-ext: unknown command '{args[0]}'. Try --help.",
+              file=sys.stderr)
+        return 2
+
+    # Default: be a stdio MCP server.
+    apply_resolve_env()
+    mcp.run()
+    return 0
+
 
 from mcp.server.fastmcp import FastMCP
 
@@ -2602,4 +2848,4 @@ def camera_comparison(action: str, params: Optional[Dict[str, Any]] = None) -> D
 
 
 if __name__ == "__main__":
-    mcp.run()
+    sys.exit(main())

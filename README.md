@@ -51,52 +51,102 @@ were unreachable through MCP before this server.
 
 ## Install
 
+Requires **Python 3.10+** and **DaVinci Resolve Studio** (external scripting is
+a Studio feature — the free build refuses it).
+
+### From a release (recommended)
+
+Download the wheel from the [releases page][releases] and install it:
+
 ```bash
-git clone <this repo> resolve-ext
-cd resolve-ext
-pip install "mcp[cli]>=1.30,<2"
+pip install resolve_ext-1.0.0-py3-none-any.whl
 ```
 
-`mcp` 2.x breaks FastMCP, so keep the `<2` pin.
+The wheel is pure Python and platform-independent — the same file works on
+Windows, macOS and Linux.
+
+### From a git checkout
+
+```bash
+pip install git+https://github.com/CaptRauti/ResolveMCP-ext
+```
+
+Or from a local clone:
+
+```bash
+git clone https://github.com/CaptRauti/ResolveMCP-ext
+cd ResolveMCP-ext
+pip install .
+```
+
+`mcp` 2.x breaks FastMCP, so the dependency is pinned `<2`. That pin is in the
+package metadata — you do not need to add it yourself.
+
+### Verify the installation
+
+```bash
+resolve-ext doctor
+```
+
+```
+resolve-ext 1.0.0
+
+--- Python ---
+  3.12.4 at /usr/bin/python3
+  ok (3.10+)
+
+--- DaVinci Resolve scripting API ---
+platform      linux
+api_path      /opt/resolve/Developer/Scripting  (found)
+lib_path      /opt/resolve/libs/fusionscript.so  (found)
+
+--- Import test ---
+  ok: DaVinciResolveScript imports
+
+--- Live connection ---
+  ok: connected to Resolve; project = My Project
+
+--- Result ---
+  All checks passed.
+```
+
+`doctor` exits `0` when everything works and `1` otherwise, so it is usable in
+a setup script. When something is wrong it names the exact path that is missing
+and what to enable.
 
 ### Register with your MCP client
 
-The server speaks **stdio** and needs the environment the official Resolve
-scripting API expects, so that `import DaVinciResolveScript` resolves.
-
-```bash
-# Hermes
-hermes mcp add resolve-ext \
-  --command "<python.exe>" \
-  --env "RESOLVE_SCRIPT_API=C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting" \
-        "RESOLVE_SCRIPT_LIB=C:\Program Files\Blackmagic Design\DaVinci Resolve\fusionscript.dll" \
-        "PYTHONPATH=C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Modules" \
-  --connect-timeout 60 \
-  --args "<abs path to>/server.py"
-```
-
-Generic JSON. When merging into an existing config the server entry sits
-**flat** under the client's own `mcpServers` key — do not wrap it in a second
-`mcpServers` level, that silently disables tool discovery:
+The server finds Resolve's scripting API by itself, so on a default
+installation there is **nothing to configure**:
 
 ```json
 {
   "mcpServers": {
-    "resolve-ext": {
-      "command": "python.exe",
-      "args": ["C:\\path\\to\\resolve-ext\\server.py"],
-      "env": {
-        "RESOLVE_SCRIPT_API": "C:\\ProgramData\\Blackmagic Design\\DaVinci Resolve\\Support\\Developer\\Scripting",
-        "RESOLVE_SCRIPT_LIB": "C:\\Program Files\\Blackmagic Design\\DaVinci Resolve\\fusionscript.dll",
-        "PYTHONPATH": "C:\\ProgramData\\Blackmagic Design\\DaVinci Resolve\\Support\\Developer\\Scripting\\Modules"
-      }
-    }
+    "resolve-ext": { "command": "resolve-ext" }
   }
 }
 ```
 
-Resolve must run with **Preferences → General → External scripting → Local**,
-and external scripting is **Studio-only** — the free build refuses it.
+For a non-standard Resolve location, or to see the explicit form, run:
+
+```bash
+resolve-ext env
+```
+
+which prints the configuration for the machine it runs on — including the exact
+`RESOLVE_SCRIPT_API`, `RESOLVE_SCRIPT_LIB` and `PYTHONPATH` values — as generic
+JSON and as a `hermes mcp add` command.
+
+When merging into an existing client config, the server entry sits **flat**
+under the client's own `mcpServers` key. Do not wrap it in a second
+`mcpServers` level — that silently disables tool discovery.
+
+### Resolve settings
+
+Resolve must be running with **Preferences → System → General → External
+scripting using → Local**.
+
+[releases]: https://github.com/CaptRauti/ResolveMCP-ext/releases
 
 ## Tools
 
@@ -323,18 +373,34 @@ Everything below was measured against a live Studio build, not read from docs.
 
 ## Testing
 
+Two layers, because DaVinci Resolve cannot run in CI.
+
+### Offline — no Resolve needed, this is what CI runs
+
 ```bash
-# requires Resolve running plus the env vars exported
+python tests/test_offline.py
+```
+
+Checks that `server.py` imports **without** Resolve present (so `pip install`
+followed by `resolve-ext --help` cannot fail), that all ten tools register,
+that the CLI returns the right exit codes, and that the platform path
+resolution produces the correct paths for the OS it finds itself on. Runs on
+Windows, macOS and Linux — see `.github/workflows/test.yml`.
+
+### Live — needs a running Resolve Studio
+
+```bash
 python tests/test_e2e.py        # core tools
 python tests/test_phase1.py     # photo albums + node graph
 python tests/test_extras.py     # render presets, audio formats, transcription
-python tests/test_camera.py     # camera layouts, labels, markers
+python tests/test_camera.py     # camera layouts, labels, markers, sorting
 
 # point at your own media if ~/Pictures has fewer than 3 PNGs
-RESOLVE_EXT_TEST_MEDIA="D:/stills/*.png" python tests/test_phase1.py
+RESOLVE_EXT_TEST_MEDIA="D:/stills/*.png" python tests/test_camera.py
 ```
 
-**132 assertions, 0 failures** against Resolve Studio 21.1.2.10.
+**162 assertions, 0 failures** against Resolve Studio 21.1.2.10
+(30 offline + 132 live).
 
 Each suite creates its own scratch project, exercises the tools and deletes it
 again — they never touch your other projects. Two habits are deliberate:
