@@ -157,7 +157,7 @@ def _effect_info(eff) -> Dict[str, Any]:
     }
 
 
-mcp = FastMCP("resolve-ext")
+mcp = FastMCP("ResolveMCP-ext")
 
 
 # --- tools ---------------------------------------------------------------
