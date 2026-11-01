@@ -160,7 +160,92 @@ def _effect_info(eff) -> Dict[str, Any]:
 mcp = FastMCP("ResolveMCP-ext")
 
 
-# --- tools ---------------------------------------------------------------
+# --- photo album + node graph helpers (Resolve 21.1.2) -------------------
+
+def _call_any(candidates, method: str, *args):
+    """Call `method` on the first candidate that answers usefully.
+
+    Why so defensive: DaVinci Resolve hands out *dynamic proxy* objects, so
+    `hasattr(obj, m)` and `callable(getattr(obj, m))` are TRUE for every method
+    on every object — a Timeline reports the photo-album methods, Resolve
+    reports Project's. Worse, calling a method the object does not own does not
+    raise: it returns None.
+
+    So the only reliable test is to call it and look at the result:
+      - raises TypeError('NoneType' object is not callable) -> not this object
+      - returns None while other candidates remain          -> keep looking
+      - returns anything else (including 0 / [] / False)    -> this is it
+
+    candidates: [(label, obj), ...]
+    Returns (result, label, error).
+    """
+    last_err = None
+    for label, obj in candidates:
+        if obj is None:
+            continue
+        fn = getattr(obj, method, None)
+        if fn is None:
+            continue
+        try:
+            res = fn(*args)
+        except TypeError as exc:
+            if "not callable" in str(exc):
+                last_err = f"{label}.{method}: not callable on this object"
+                continue
+            return None, label, f"{label}.{method}: {exc}"
+        except Exception as exc:
+            return None, label, f"{label}.{method}: {exc}"
+        if res is None:
+            last_err = f"{label}.{method} returned None"
+            continue
+        return res, label, None
+    return None, None, last_err or f"No object exposes {method} on this build."
+
+
+def _photo_objs(proj, mp):
+    """Candidate objects for the project/media-pool level photo-album API.
+
+    Measured on 21.1.2.10: the *listing* methods live on Project, the
+    *creating/adding* ones on MediaPool, and Resolve answers none of them —
+    but which is which is not documented and could move between builds, so both
+    are tried in order by _call_any.
+    """
+    return [("MediaPool", mp), ("Project", proj)]
+
+
+def _resolve_album(proj, mp, album_id=None, name=None):
+    """Find a PhotoAlbum by unique id or name."""
+    n, _, err = _call_any(_photo_objs(proj, mp), "GetPhotoAlbumCount")
+    if err and n is None:
+        return None, err
+    albums = []
+    for i in range(1, int(n or 0) + 1):
+        a, _, _ = _call_any(_photo_objs(proj, mp), "GetPhotoAlbumByIndex", i)
+        if a:
+            albums.append(a)
+    if album_id:
+        for a in albums:
+            if a.GetUniqueId() == album_id:
+                return a, None
+        return None, f"No photo album with id '{album_id}'."
+    if name:
+        hits = [a for a in albums if a.GetName() == name]
+        if len(hits) == 1:
+            return hits[0], None
+        if not hits:
+            return None, f"No photo album named '{name}'."
+        return None, f"{len(hits)} albums named '{name}' — pass album_id."
+    return None, "Provide album_id or name."
+
+
+
+def _album_summary(a) -> Dict[str, Any]:
+    try:
+        n = len(a.GetPhotoList() or [])
+    except Exception:
+        n = None
+    return {"name": a.GetName(), "id": a.GetUniqueId(), "photo_count": n}
+
 
 @mcp.tool()
 def effects(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -992,6 +1077,732 @@ def folder_ops(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str
         )
 
     return _err(f"Unknown action '{action}'. Use parent_of_clip, parent_of_folder, path or find_clip.")
+
+
+@mcp.tool()
+def photo_albums(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Photo albums and their items (Resolve 21.1.2+).
+
+    A photo album is the stills/photo counterpart of a timeline: an ordered set
+    of photo items, each with its own grade, flags, rating and versions.
+    Measured on 21.1.2.10 this whole area works — 9/9 PhotoAlbum methods and
+    20/20 PhotoAlbumItem methods answered.
+
+    The API is split across objects and the split is NOT documented: the album
+    *listing* methods live on Project, while creating/adding lives on MediaPool,
+    and Resolve itself answers none of them. This tool resolves the right object
+    at call time, so it keeps working if a build moves them.
+
+    Albums:
+      list() -> {albums, count}
+      current() -> {album|None}
+      set_current(album_id?|name?) -> {success, album}
+      create(name) -> {album}
+      create_from_photos(name, clip_ids) -> {album}
+        — THE RELIABLE WAY to get photos into an album: VERIFIED working
+          (added 2 photos, read back). Prefer this over add_photos.
+      delete(album_ids?) -> {success, deleted}
+      rename(album_id?|name?, new_name) -> {success, album}
+      quick_export_presets() -> {presets}
+      render_settings(settings?) -> {settings}
+
+    Photos inside an album:
+      photos(album_id?|name?) -> {photos, count}
+      add_photos(clip_ids, album_id?|name?) -> {added, count}
+        — BROKEN on 21.1.2.10: AddToPhotoAlbum adds nothing and returns an
+          empty list. This action verifies by reading the album back and
+          reports the failure with the measurement instead of a false success.
+          Use create_from_photos instead (verified working).
+      remove_photos(photo_ids, album_id?|name?) -> {success, remaining}
+      current_item(album_id?|name?) -> {photo|None}
+
+    Per-photo properties (address a photo by photo_id, or by name inside an
+    album):
+      photo(photo_id|photo_name?, album_id?|name?) -> {photo}
+      rate(photo_id|photo_name?, stars) -> {success, rating}
+      flag(photo_id|photo_name?, color?|clear?) -> {success, flags}
+      clip_color(photo_id|photo_name?, color?|clear?) -> {success, clip_color}
+      versions(photo_id|photo_name?) -> {versions, current}
+      add_version(photo_id|photo_name?, version_name) -> {success, versions}
+      load_version(photo_id|photo_name?, version_name) -> {success}
+      delete_version(photo_id|photo_name?, version_name) -> {success}
+      copy_grade(source_photo_id|source_photo_name?, photo_ids) -> {success}
+      effects_list(photo_id|photo_name?) -> {effects, count}
+      effect_apply(photo_id|photo_name?, category, id) -> {effect}
+      effect_remove(photo_id|photo_name?, category, indices?) -> {success}
+      fusion_comps(photo_id|photo_name?) -> {comps, count}
+      fusion_add(photo_id|photo_name?) -> {success, comps}
+      stills(album_id?|name?, all_photos?) -> {success, grabbed}
+
+    Notes:
+      - `clip_ids` are MediaPoolItem ids (see media_pool_item.get_name).
+      - Ratings are 0-5; the API silently accepts out-of-range values, so this
+        tool clamps and reports what actually came back.
+
+    Measured on Resolve 21.1.2.10:
+      WORKING  — 9/9 PhotoAlbum methods, 20/20 PhotoAlbumItem methods,
+                 CreatePhotoAlbumFromPhotos (photos land and read back),
+                 ratings/flags/versions persist, AddFusionComp on a photo.
+      BROKEN   — AddToPhotoAlbum adds nothing (four variants tried);
+                 Graph.ResetAllNodeColors exists on photo graphs but not on
+                 timeline clip graphs; MediaPoolItem.GetNodeGraph not callable;
+                 a freshly created album is not automatically "current"
+                 (this tool sets it).
+    """
+    p = params or {}
+    ctx, err = _ctx()
+    if err:
+        return err
+    _, _, proj, _ = ctx
+    mp = proj.GetMediaPool()
+
+    # ---- album listing / lifecycle -------------------------------------
+    if action == "list":
+        n, _who, err = _call_any(_photo_objs(proj, mp), "GetPhotoAlbumCount")
+        if err and n is None:
+            return _err(err)
+        out = []
+        for i in range(1, int(n or 0) + 1):
+            a, _w, _e = _call_any(_photo_objs(proj, mp), "GetPhotoAlbumByIndex", i)
+            if a:
+                out.append(_album_summary(a))
+        return _ok(albums=out, count=len(out))
+
+    if action == "current":
+        a, _who, err = _call_any(_photo_objs(proj, mp), "GetCurrentPhotoAlbum")
+        if err and a is None and "returned None" not in (err or ""):
+            return _err(err)
+        return _ok(album=_album_summary(a) if a else None)
+
+    if action == "set_current":
+        album, aerr = _resolve_album(proj, mp, p.get("album_id"), p.get("name"))
+        if aerr:
+            return aerr
+        _r, _who, err = _call_any(_photo_objs(proj, mp), "SetCurrentPhotoAlbum", album)
+        if err or _r is None:
+            return _err(err or "SetCurrentPhotoAlbum returned nothing.")
+        if _r is False:
+            return _err("SetCurrentPhotoAlbum returned False.")
+        return _ok(album=_album_summary(album))
+
+    if action == "create":
+        name = p.get("name")
+        if not name:
+            return _err("create needs name.")
+        a, _who, err = _call_any(_photo_objs(proj, mp), "CreateEmptyPhotoAlbum", name)
+        if err or not a:
+            return _err(err or f"CreateEmptyPhotoAlbum('{name}') returned nothing.")
+        # A freshly created album is not automatically current, and
+        # AddToPhotoAlbum appends to the CURRENT album — so set it here.
+        _call_any(_photo_objs(proj, mp), "SetCurrentPhotoAlbum", a)
+        return _ok(album=_album_summary(a))
+
+    if action == "create_from_photos":
+        name, ids = p.get("name"), p.get("clip_ids")
+        if not name or not ids:
+            return _err("create_from_photos needs name and clip_ids.")
+        items = []
+        root = mp.GetRootFolder()
+        for cid in ids:
+            c = _find_clip_recursive(root, cid)
+            if not c:
+                return _err(f"No media pool clip with id '{cid}'.")
+            items.append(c)
+        a, _who, err = _call_any(_photo_objs(proj, mp), "CreatePhotoAlbumFromPhotos", name, items)
+        if err or not a:
+            return _err(err or "CreatePhotoAlbumFromPhotos returned nothing.")
+        _call_any(_photo_objs(proj, mp), "SetCurrentPhotoAlbum", a)
+        return _ok(album=_album_summary(a))
+
+    if action == "delete":
+        ids = p.get("album_ids")
+        if ids:
+            targets = []
+            for aid in ids:
+                a, e = _resolve_album(proj, mp, album_id=aid)
+                if e:
+                    return e
+                targets.append(a)
+        else:
+            n, _w, _e = _call_any(_photo_objs(proj, mp), "GetPhotoAlbumCount")
+            targets = []
+            for i in range(1, int(n or 0) + 1):
+                a, _w2, _e2 = _call_any(_photo_objs(proj, mp), "GetPhotoAlbumByIndex", i)
+                if a:
+                    targets.append(a)
+        if not targets:
+            return _ok(deleted=0, note="No albums to delete.")
+        names = [t.GetName() for t in targets]
+        ok, _who, err = _call_any(_photo_objs(proj, mp), "DeletePhotoAlbums", targets)
+        if err or ok is None:
+            return _err(err or "DeletePhotoAlbums returned nothing.")
+        if ok is False:
+            return _err("DeletePhotoAlbums returned False.")
+        return _ok(deleted=len(targets), names=names)
+
+    if action == "rename":
+        album, aerr = _resolve_album(proj, mp, p.get("album_id"), p.get("name"))
+        if aerr:
+            return aerr
+        new_name = p.get("new_name")
+        if not new_name:
+            return _err("rename needs new_name.")
+        ok = album.SetName(new_name)
+        if not ok:
+            return _err(
+                f"SetName('{new_name}') returned False — the name must be "
+                "unique among albums in the project."
+            )
+        return _ok(album=_album_summary(album))
+
+    if action == "quick_export_presets":
+        res, _who, err = _call_any(_photo_objs(proj, mp), "GetPhotoQuickExportRenderPresets")
+        if err and res is None:
+            return _err(err)
+        return _ok(presets=res or [])
+
+    if action == "render_settings":
+        settings = p.get("settings")
+        if settings is None:
+            return _err(
+                "render_settings needs settings. The shape is Resolve's "
+                "PhotoRenderSettings: see the API stubs "
+                "(search_scripting_api 'PhotoRenderSettings')."
+            )
+        ok, _who, err = _call_any(_photo_objs(proj, mp), "SetPhotoRenderSettings", settings)
+        if err or ok is None:
+            return _err(err or "SetPhotoRenderSettings returned nothing.")
+        if ok is False:
+            return _err("SetPhotoRenderSettings returned False.")
+        return _ok(applied=settings)
+
+    # ---- photos in an album --------------------------------------------
+    if action in ("photos", "add_photos", "remove_photos", "current_item", "stills"):
+        # add_photos addresses the album via current album or name
+        if action == "add_photos":
+            ids = p.get("clip_ids")
+            if not ids:
+                return _err("add_photos needs clip_ids.")
+            items = []
+            root = mp.GetRootFolder()
+            for cid in ids:
+                c = _find_clip_recursive(root, cid)
+                if not c:
+                    return _err(f"No media pool clip with id '{cid}'.")
+                items.append(c)
+            # AddToPhotoAlbum appends to the CURRENT album.
+            target, terr = _resolve_album(proj, mp, p.get("album_id"), p.get("name"))
+            if terr and (p.get("album_id") or p.get("name")):
+                return terr
+            if target:
+                _call_any(_photo_objs(proj, mp), "SetCurrentPhotoAlbum", target)
+
+            album_now, _w, _e = _call_any(_photo_objs(proj, mp), "GetCurrentPhotoAlbum")
+            before = len((album_now.GetPhotoList() or [])) if album_now else None
+
+            res, _who, err = _call_any(_photo_objs(proj, mp), "AddToPhotoAlbum", items)
+
+            # Verify by reading back — do NOT trust the call.
+            after_album, _w2, _e2 = _call_any(_photo_objs(proj, mp), "GetCurrentPhotoAlbum")
+            after = len((after_album.GetPhotoList() or [])) if after_album else None
+            added = []
+            for it in (res or []):
+                try:
+                    added.append({"name": it.GetName(), "id": it.GetUniqueId()})
+                except Exception:
+                    pass
+
+            if not added and before is not None and after is not None and after <= before:
+                return _err(
+                    "AddToPhotoAlbum added NOTHING (before=%s, after=%s) and "
+                    "returned %r. MEASURED on Resolve 21.1.2.10: this call is "
+                    "BROKEN — tested four ways (immediately after "
+                    "CreateEmptyPhotoAlbum, with a 2 s pause, after an explicit "
+                    "SetCurrentPhotoAlbum that GetCurrentPhotoAlbum confirmed, "
+                    "and with a fresh album each time); every run added zero "
+                    "photos and returned an empty list. Use "
+                    "photo_albums(action='create_from_photos', name=…, "
+                    "clip_ids=…) instead — that path VERIFIED working "
+                    "(2 photos added and read back)."
+                    % (before, after, res)
+                )
+            return _ok(added=added, count=len(added),
+                       album=album_now.GetName() if album_now else None)
+
+        album, aerr = _resolve_album(proj, mp, p.get("album_id"), p.get("name"))
+        if aerr:
+            return aerr
+
+        if action == "photos":
+            lst = album.GetPhotoList() or []
+            out = []
+            for it in lst:
+                out.append({
+                    "name": it.GetName(),
+                    "id": it.GetUniqueId(),
+                    "rating": it.GetRatings(),
+                    "flags": it.GetFlagList(),
+                })
+            return _ok(photos=out, count=len(out), album=album.GetName())
+
+        if action == "current_item":
+            it = album.GetCurrentItem()
+            if not it:
+                return _ok(photo=None)
+            return _ok(photo={"name": it.GetName(), "id": it.GetUniqueId()})
+
+        if action == "remove_photos":
+            ids = p.get("photo_ids")
+            if not ids:
+                return _err("remove_photos needs photo_ids.")
+            lst = album.GetPhotoList() or []
+            by_id = {}
+            for it in lst:
+                by_id[it.GetUniqueId()] = it
+            targets = [by_id[i] for i in ids if i in by_id]
+            if not targets:
+                return _err(f"None of {ids} are in album '{album.GetName()}'.")
+            ok = album.DeletePhotos(targets)
+            if not ok:
+                return _err("DeletePhotos returned False.")
+            remaining = album.GetPhotoList() or []
+            return _ok(removed=len(targets), remaining=len(remaining))
+
+        if action == "stills":
+            if p.get("all_photos"):
+                st = album.GrabAllStills()
+                return _ok(grabbed=len(st or []), grabbed_all=True)
+            st = album.GrabStill()
+            return _ok(grabbed=1 if st else 0, grabbed_all=False)
+
+    # ---- per-photo properties ------------------------------------------
+    PHOTO_ACTIONS = {
+        "photo", "rate", "flag", "clip_color", "versions", "add_version",
+        "load_version", "delete_version", "copy_grade", "effects_list",
+        "effect_apply", "effect_remove", "fusion_comps", "fusion_add",
+    }
+    if action in PHOTO_ACTIONS:
+        photo = None
+        pid = p.get("photo_id")
+        pname = p.get("photo_name")
+        album = None
+        if p.get("album_id") or p.get("name") or action == "copy_grade":
+            album, aerr = _resolve_album(proj, mp, p.get("album_id"), p.get("name"))
+            if aerr and action != "copy_grade":
+                return aerr
+        if not album:
+            album, _w, _e = _call_any(_photo_objs(proj, mp), "GetCurrentPhotoAlbum")
+        if album is None:
+            return _err("No photo album found. Pass album_id/name or set a current album.")
+
+        if pid or pname:
+            lst = album.GetPhotoList() or []
+            for it in lst:
+                if (pid and it.GetUniqueId() == pid) or (pname and it.GetName() == pname):
+                    photo = it
+                    break
+            if photo is None:
+                return _err(f"Photo '{pid or pname}' not found in album '{album.GetName()}'.")
+        else:
+            photo = album.GetCurrentItem()
+            if photo is None:
+                return _err("No photo addressed. Pass photo_id/photo_name, or select one.")
+
+        if action == "photo":
+            return _ok(photo={
+                "name": photo.GetName(),
+                "id": photo.GetUniqueId(),
+                "rating": photo.GetRatings(),
+                "flags": photo.GetFlagList(),
+                "clip_color": photo.GetClipColor(),
+                "versions": photo.GetVersionNameList(),
+                "current_version": photo.GetCurrentVersion(),
+                "fusion_comp_count": photo.GetFusionCompCount(),
+            })
+
+        if action == "rate":
+            stars = p.get("stars")
+            if stars is None:
+                return _err("rate needs stars (0-5).")
+            want = max(0, min(5, int(stars)))
+            photo.SetRatings(want)
+            got = photo.GetRatings()
+            if got != want:
+                return _err(f"SetRatings({want}) silently gave {got}.")
+            return _ok(rating=got)
+
+        if action == "flag":
+            if p.get("clear"):
+                ok = photo.ClearFlags(p.get("color") or "All")
+                if not ok:
+                    return _err("ClearFlags returned False.")
+                return _ok(flags=photo.GetFlagList())
+            color = p.get("color")
+            if not color:
+                return _err("flag needs color, or clear=true.")
+            ok = photo.AddFlag(color)
+            if not ok:
+                return _err(
+                    f"AddFlag('{color}') returned False — valid colours are "
+                    "Resolve's FlagColor values (Blue, Cyan, Green, Yellow, "
+                    "Red, Pink, Purple, Fuchsia, Rose, Lavender, Sky, Mint, "
+                    "Lemon, Sand, Cocoa, Cream)."
+                )
+            return _ok(flags=photo.GetFlagList())
+
+        if action == "clip_color":
+            if p.get("clear"):
+                photo.ClearClipColor()
+                return _ok(clip_color=photo.GetClipColor())
+            color = p.get("color")
+            if not color:
+                return _err("clip_color needs color, or clear=true.")
+            ok = photo.SetClipColor(color)
+            if not ok:
+                return _err(
+                    f"SetClipColor('{color}') returned False — the colour name "
+                    "must match Resolve's ClipColor values (e.g. Orange, "
+                    "Apricot, Yellow, Lime, Olive, Green, Teal, Navy, Blue, "
+                    "Purple, Violet, Pink, Tan, Beige, Brown, Chocolate)."
+                )
+            return _ok(clip_color=photo.GetClipColor())
+
+        if action == "versions":
+            return _ok(versions=photo.GetVersionNameList(), current=photo.GetCurrentVersion())
+
+        if action == "add_version":
+            vn = p.get("version_name")
+            if not vn:
+                return _err("add_version needs version_name.")
+            ok = photo.AddVersion(vn)
+            if not ok:
+                return _err(f"AddVersion('{vn}') returned False (name must be unique).")
+            return _ok(versions=photo.GetVersionNameList())
+
+        if action == "load_version":
+            vn = p.get("version_name")
+            if not vn:
+                return _err("load_version needs version_name.")
+            ok = photo.LoadVersionByName(vn)
+            if not ok:
+                return _err(f"LoadVersionByName('{vn}') returned False.")
+            return _ok(current=photo.GetCurrentVersion())
+
+        if action == "delete_version":
+            vn = p.get("version_name")
+            if not vn:
+                return _err("delete_version needs version_name.")
+            ok = photo.DeleteVersionByName(vn)
+            if not ok:
+                return _err(f"DeleteVersionByName('{vn}') returned False.")
+            return _ok(versions=photo.GetVersionNameList())
+
+        if action == "copy_grade":
+            ok = photo.CopyGrades([photo])
+            return _ok(copied=bool(ok), note="PhotoAlbumItem.CopyGrades")
+
+        if action == "effects_list":
+            cat = p.get("category")
+            cats = [cat] if cat else ["ofx", "fusion"]
+            found = []
+            for c in cats:
+                try:
+                    for e in (photo.GetEffects(c) or []):
+                        found.append(_effect_info(e))
+                except Exception as exc:
+                    found.append({"category": c, "error": str(exc)})
+            return _ok(effects=found, count=len(found))
+
+        if action == "effect_apply":
+            cat, eid = p.get("category"), p.get("id")
+            if not cat or not eid:
+                return _err("effect_apply needs category ('ofx'|'fusion') and id.")
+            eff = photo.AddEffect(cat, eid)
+            if not eff:
+                return _err(f"AddEffect('{cat}','{eid}') returned None.")
+            return _ok(effect=_effect_info(eff))
+
+        if action == "effect_remove":
+            cat = p.get("category")
+            if not cat:
+                return _err("effect_remove needs category.")
+            current = photo.GetEffects(cat) or []
+            idxs = p.get("indices")
+            if idxs:
+                by_index = {}
+                for e in current:
+                    try:
+                        by_index[e.GetIndex()] = e
+                    except Exception:
+                        pass
+                targets = [by_index[i] for i in idxs if i in by_index]
+            else:
+                targets = list(current)
+            if not targets:
+                return _ok(removed=0, note=f"No '{cat}' effects on the photo.")
+            ok = photo.DeleteEffects(targets)
+            if not ok:
+                return _err("DeleteEffects returned False.")
+            return _ok(removed=len(targets))
+
+        if action == "fusion_comps":
+            names = photo.GetFusionCompNameList()
+            return _ok(comps=names, count=photo.GetFusionCompCount())
+
+        if action == "fusion_add":
+            comp = photo.AddFusionComp()
+            if not comp:
+                return _err("AddFusionComp returned nothing.")
+            return _ok(comps=photo.GetFusionCompNameList(),
+                       count=photo.GetFusionCompCount())
+
+    return _err(
+        f"Unknown action '{action}'. Album actions: list, current, set_current, "
+        "create, create_from_photos, delete, rename, quick_export_presets, "
+        "render_settings, photos, add_photos, remove_photos, current_item, "
+        "stills. Photo actions: photo, rate, flag, clip_color, versions, "
+        "add_version, load_version, delete_version, copy_grade, effects_list, "
+        "effect_apply, effect_remove, fusion_comps, fusion_add."
+    )
+
+
+@mcp.tool()
+def node_graph(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Node graph inspection and labelling, on a clip or a photo (21.1.2+).
+
+    Verified working on 21.1.2.10: GetNodeLabel, SetNodeLabel, GetNodeColor,
+    SetNodeColor, SetNodeEnabled, GetNumNodes, ResetAllGrades, ResetAllNodeColors.
+    SetLUT/GetLUT returned False/None in testing (a LUT path is required and
+    must exist) — the tool reports what it gets rather than assuming.
+
+    Target: pass `item_id`/`name` for a timeline clip, or `photo_id` for a photo
+    album item. `clip_id` is accepted but NOT usable on 21.1.2.10:
+    MediaPoolItem.GetNodeGraph is not callable there, while the timeline and
+    photo variants both work.
+
+    Actions:
+      info(item_id?|name?|photo_id?|clip_id?, track_type?, track_index?)
+        -> {num_nodes, nodes: [{index, label, color, enabled}]}
+      label(node_index, label, ...) -> {success, nodes}
+        — SetNodeLabel. Pass an empty string to clear.
+      color(node_index, color, ...) -> {success, nodes}
+        — SetNodeColor. Valid names: Orange, Apricot, Yellow, Lime, Olive,
+          Green, Teal, Navy, Blue, Purple, Violet, Pink, Tan, Beige, Brown,
+          Chocolate. An empty string clears the color.
+      enable(node_index, enabled, ...) -> {success, nodes}
+      tools(node_index, ...) -> {tools}
+        — which Fusion/OFX tools sit in that node.
+      lut(node_index, lut_path?, ...) -> {success, lut}
+        — read, or set when lut_path is given (Resolve's relative LUT path).
+      cache(node_index, mode?, ...) -> {success, cache_mode}
+      reset_colors(...) -> {success}
+      reset_grades(...) -> {success}   — destructive: clears the whole grade.
+    """
+    p = params or {}
+    ctx, err = _ctx()
+    if err:
+        return err
+    _, _, proj, tl = ctx
+    mp = proj.GetMediaPool()
+
+    # --- resolve the graph -------------------------------------------------
+    graph = None
+    origin = None
+
+    if p.get("photo_id"):
+        album, _w, _e = _call_any(_photo_objs(proj, mp), "GetCurrentPhotoAlbum")
+        if album is None:
+            return _err("No current photo album for photo_id lookup.")
+        for it in (album.GetPhotoList() or []):
+            if it.GetUniqueId() == p["photo_id"]:
+                graph = it.GetNodeGraph()
+                origin = f"photo {it.GetName()}"
+                break
+        if graph is None:
+            return _err(f"No photo with id '{p['photo_id']}' in the current album.")
+
+    elif p.get("clip_id"):
+        c = _find_clip_recursive(mp.GetRootFolder(), p["clip_id"])
+        if not c:
+            return _err(f"No media pool clip with id '{p['clip_id']}'.")
+        fn = getattr(c, "GetNodeGraph", None)
+        if fn is None:
+            return _err(
+                "MediaPoolItem.GetNodeGraph is not available on Resolve "
+                "21.1.2.10 (measured: the attribute is not callable, while "
+                "TimelineItem.GetNodeGraph and PhotoAlbumItem.GetNodeGraph "
+                "both work). Add the clip to a timeline and address it with "
+                "item_id instead, or pass photo_id for a photo album item."
+            )
+        try:
+            graph = fn()
+        except TypeError:
+            return _err(
+                "MediaPoolItem.GetNodeGraph is not callable on Resolve "
+                "21.1.2.10. Put the clip on a timeline and use item_id, or "
+                "pass photo_id for a photo album item."
+            )
+        origin = f"media pool clip {c.GetName()}"
+
+    else:
+        if tl is None:
+            return _err("No timeline open — pass photo_id or clip_id instead.")
+        item, ierr = _find_item(
+            tl, item_id=p.get("item_id"),
+            track_type=p.get("track_type", "video"),
+            track_index=int(p.get("track_index", 1)),
+            name=p.get("name"),
+        )
+        if ierr:
+            return ierr
+        graph = item.GetNodeGraph()
+        origin = f"timeline item {item.GetName()}"
+
+    if graph is None:
+        return _err("Could not obtain a node graph for that target.")
+
+    def _g(method, *args):
+        """Call a Graph method, tolerating ones this graph type does not have.
+
+        Measured on 21.1.2.10: a photo album item's graph answers
+        ResetAllNodeColors while a timeline clip's graph raises
+        'NoneType object is not callable' for it. Graph capability varies by
+        where the graph came from, so every call reports its own failure.
+        """
+        fn = getattr(graph, method, None)
+        if fn is None:
+            return None, f"Graph.{method} is missing on this graph."
+        try:
+            return fn(*args), None
+        except TypeError as exc:
+            if "not callable" in str(exc):
+                return None, (
+                    f"Graph.{method} is not available on a graph from this "
+                    f"target ({origin}). Measured on 21.1.2.10: it exists on "
+                    "photo album graphs but not on timeline clip graphs."
+                )
+            return None, f"Graph.{method}: {exc}"
+        except Exception as exc:
+            return None, f"Graph.{method}: {exc}"
+
+    def _snapshot():
+        out = []
+        n, err = _g("GetNumNodes")
+        if err or n is None:
+            return out
+        for i in range(1, int(n) + 1):
+            entry = {"index": i}
+            lab, _e1 = _g("GetNodeLabel", i)
+            col, _e2 = _g("GetNodeColor", i)
+            entry["label"] = lab
+            entry["color"] = col
+            out.append(entry)
+        return out
+
+    idx = p.get("node_index")
+
+    if action == "info":
+        nodes = _snapshot()
+        return _ok(target=origin, num_nodes=len(nodes), nodes=nodes)
+
+    if action in ("label", "color", "enable", "tools", "lut", "cache"):
+        if idx is None:
+            return _err(f"{action} needs node_index (1-based).")
+        idx = int(idx)
+
+    if action == "label":
+        label = p.get("label")
+        if label is None:
+            return _err("label needs label (an empty string clears it).")
+        res, err = _g("SetNodeLabel", idx, label)
+        if err or res is False:
+            n_nodes, _e = _g("GetNumNodes")
+            return _err(err or (
+                f"SetNodeLabel({idx}, '{label}') returned False — node_index "
+                f"must be 1..{n_nodes}."
+            ))
+        return _ok(nodes=_snapshot())
+
+    if action == "color":
+        color = p.get("color")
+        if color is None:
+            return _err("color needs color (an empty string clears it).")
+        res, err = _g("SetNodeColor", idx, color)
+        if err or res is False:
+            return _err(err or (
+                f"SetNodeColor({idx}, '{color}') returned False. Check the "
+                "node_index range and the colour name (Orange, Apricot, "
+                "Yellow, Lime, Olive, Green, Teal, Navy, Blue, Purple, Violet, "
+                "Pink, Tan, Beige, Brown, Chocolate; empty string clears)."
+            ))
+        return _ok(nodes=_snapshot())
+
+    if action == "enable":
+        enabled = p.get("enabled")
+        if enabled is None:
+            return _err("enable needs enabled (bool).")
+        res, err = _g("SetNodeEnabled", idx, bool(enabled))
+        if err or res is False:
+            return _err(err or f"SetNodeEnabled({idx}, {enabled}) returned False.")
+        return _ok(nodes=_snapshot())
+
+    if action == "tools":
+        res, err = _g("GetToolsInNode", idx)
+        if err:
+            return _err(err)
+        return _ok(node_index=idx, tools=res)
+
+    if action == "lut":
+        lut_path = p.get("lut_path")
+        if lut_path is None:
+            lut, err = _g("GetLUT", idx)
+            if err:
+                return _err(err)
+            return _ok(node_index=idx, lut=lut)
+        res, err = _g("SetLUT", idx, lut_path)
+        if err or res is False:
+            return _err(err or (
+                f"SetLUT({idx}, '{lut_path}') returned False — the path must be "
+                "a LUT Resolve can resolve (relative to the master LUT root). "
+                "See the `lut` tool's list action for valid names."
+            ))
+        lut, _e = _g("GetLUT", idx)
+        return _ok(node_index=idx, lut=lut)
+
+    if action == "cache":
+        mode = p.get("mode")
+        if mode is None:
+            cm, err = _g("GetNodeCacheMode", idx)
+            if err:
+                return _err(err)
+            return _ok(node_index=idx, cache_mode=cm)
+        res, err = _g("SetNodeCacheMode", idx, mode)
+        if err or res is False:
+            return _err(err or f"SetNodeCacheMode({idx}, {mode}) returned False.")
+        cm, _e = _g("GetNodeCacheMode", idx)
+        return _ok(node_index=idx, cache_mode=cm)
+
+    if action == "reset_colors":
+        res, err = _g("ResetAllNodeColors")
+        if err or res is False:
+            return _err(err or "ResetAllNodeColors returned False.")
+        return _ok(nodes=_snapshot())
+
+    if action == "reset_grades":
+        if not p.get("confirm"):
+            return _err(
+                "reset_grades is DESTRUCTIVE — it clears the whole grade on "
+                "every node. Pass confirm=true to proceed."
+            )
+        res, err = _g("ResetAllGrades")
+        if err or res is False:
+            return _err(err or "ResetAllGrades returned False.")
+        return _ok(nodes=_snapshot())
+
+    return _err(
+        f"Unknown action '{action}'. Use info, label, color, enable, tools, "
+        "lut, cache, reset_colors or reset_grades."
+    )
 
 
 if __name__ == "__main__":
