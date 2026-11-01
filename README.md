@@ -1,5 +1,7 @@
 # resolve-ext
 
+<!-- mcp-name: io.github.CaptRauti/resolve-ext -->
+
 An MCP server that adds the **DaVinci Resolve 21.1.2 scripting surfaces the
 mainstream Resolve MCP servers do not cover** — clip effects, effect
 properties, Paste-Attributes, frame export and media-pool folder lookups.
