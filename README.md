@@ -51,6 +51,10 @@ were unreachable through MCP before this server.
 
 ## Install
 
+> **Installing this with an AI agent?** Point it at
+> [AGENTS.md](AGENTS.md) — it is a step-by-step procedure written for agents,
+> including the failure cases. This section is the human-facing version.
+
 Requires **Python 3.10+** and **DaVinci Resolve Studio** (external scripting is
 a Studio feature — the free build refuses it).
 
