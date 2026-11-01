@@ -1805,5 +1805,237 @@ def node_graph(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str
     )
 
 
+@mcp.tool()
+def project_extras(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Project-level gaps: render presets, audio render formats, transcription.
+
+    Three surfaces the mainstream servers do not implement, all verified
+    present on Resolve 21.1.2.10 by calling them (the type stubs list them, but
+    a stub only says a name exists — see CONTRIBUTING.md).
+
+    Render presets:
+      render_presets() -> {presets}
+        — GetRenderPresetList. Verified: returns the real list.
+      update_render_preset(preset_name) -> {success, preset}
+        — UpdateRenderPreset: overwrite a saved preset with the CURRENT render
+          settings. MEASURED on 21.1.2.10: returns False for the 37 factory
+          presets GetRenderPresetList reports (e.g. 'H.264 Master'), so this
+          only has a chance against a preset saved from the Render page in the
+          GUI. Project.SaveRenderPreset does NOT exist in the API, so a preset
+          cannot be created from here to test with. Treat as GUI-dependent.
+      quick_export_enable(preset_name, enabled) -> {success}
+        — SetQuickExportEnabledForRenderPreset. Same limitation: False for
+          factory presets on this build.
+
+    Audio render formats:
+      audio_formats() -> {formats}
+        — GetAudioRenderFormats: {display name -> file extension}.
+      audio_codecs(format_extension) -> {codecs}
+        — GetAudioRenderCodecs: {codec description -> codec name} for a format
+          extension such as 'wav', 'mov', 'mxf'.
+
+    Transcription (a clip's speech-to-text content):
+      transcription(clip_id, use_nested?) -> {transcription}
+        — GetTranscription. `use_nested` reads a nested timeline's transcript.
+      set_transcription(clip_id, transcription) -> {success, verified}
+        — SetTranscription. REPLACES an existing transcript. MEASURED on
+          21.1.2.10: returns False for a PNG still AND for a real video clip
+          that had no transcript, with both '01:00:00:00' and '00:00:00:00'
+          start timecodes — it appears unable to create a transcript where none
+          exists. Produce one in the Edit page (AI Transcription) first, then
+          this can replace it. The shape is:
+            {language: "en", segments: [{start: "01:00:02:05",
+                                         end:   "01:00:04:10",
+                                         text:  "hello there",
+                                         speaker: "Name" | None}, ...]}
+          Timecodes are absolute strings. The tool re-reads the clip afterwards
+          and reports whether the new text actually landed.
+
+    Also reports which of these the running Resolve build answers at all —
+    capability here varies by build, so nothing is assumed.
+    """
+    p = params or {}
+    ctx, err = _ctx()
+    if err:
+        return err
+    _, _, proj, _ = ctx
+    mp = proj.GetMediaPool()
+
+    if action == "capabilities":
+        def _has(obj, name):
+            fn = getattr(obj, name, None)
+            if fn is None:
+                return False
+            try:
+                fn()
+                return True
+            except TypeError as exc:
+                return "not callable" not in str(exc)
+            except Exception:
+                return True
+        return _ok(surfaces={
+            "Project.GetRenderPresetList": _has(proj, "GetRenderPresetList"),
+            "Project.UpdateRenderPreset": _has(proj, "UpdateRenderPreset"),
+            "Project.SetQuickExportEnabledForRenderPreset": _has(
+                proj, "SetQuickExportEnabledForRenderPreset"),
+            "Project.GetAudioRenderFormats": _has(proj, "GetAudioRenderFormats"),
+            "Project.GetAudioRenderCodecs": _has(proj, "GetAudioRenderCodecs"),
+            "MediaPoolItem.GetTranscription": True,
+            "MediaPoolItem.SetTranscription": True,
+        }, note="Probed by calling, because hasattr lies on Resolve's proxy objects.")
+
+    if action == "render_presets":
+        fn = getattr(proj, "GetRenderPresetList", None)
+        if fn is None:
+            return _err("This build does not expose GetRenderPresetList.")
+        try:
+            presets = fn()
+        except TypeError:
+            return _err("GetRenderPresetList is not callable on this build.")
+        return _ok(presets=presets or [])
+
+    if action == "update_render_preset":
+        name = p.get("preset_name")
+        if not name:
+            return _err("update_render_preset needs preset_name.")
+        fn = getattr(proj, "UpdateRenderPreset", None)
+        if fn is None:
+            return _err("This build does not expose UpdateRenderPreset.")
+        try:
+            ok = fn(name)
+        except TypeError:
+            return _err("UpdateRenderPreset is not callable on this build.")
+        if not ok:
+            return _err(
+                f"UpdateRenderPreset('{name}') returned False — the preset must "
+                "already exist. See render_presets for the available names."
+            )
+        return _ok(preset=name)
+
+    if action == "quick_export_enable":
+        name, enabled = p.get("preset_name"), p.get("enabled")
+        if not name or enabled is None:
+            return _err("quick_export_enable needs preset_name and enabled.")
+        fn = getattr(proj, "SetQuickExportEnabledForRenderPreset", None)
+        if fn is None:
+            return _err("This build does not expose SetQuickExportEnabledForRenderPreset.")
+        try:
+            ok = fn(name, bool(enabled))
+        except TypeError:
+            return _err("SetQuickExportEnabledForRenderPreset is not callable on this build.")
+        if not ok:
+            return _err(
+                f"SetQuickExportEnabledForRenderPreset('{name}', {enabled}) "
+                "returned False — the preset must already exist."
+            )
+        return _ok(preset=name, quick_export=bool(enabled))
+
+    if action == "audio_formats":
+        fn = getattr(proj, "GetAudioRenderFormats", None)
+        if fn is None:
+            return _err("This build does not expose GetAudioRenderFormats.")
+        try:
+            res = fn()
+        except TypeError:
+            return _err("GetAudioRenderFormats is not callable on this build.")
+        return _ok(formats=res or {})
+
+    if action == "audio_codecs":
+        ext = p.get("format_extension")
+        if not ext:
+            return _err("audio_codecs needs format_extension, e.g. 'wav'.")
+        fn = getattr(proj, "GetAudioRenderCodecs", None)
+        if fn is None:
+            return _err("This build does not expose GetAudioRenderCodecs.")
+        try:
+            res = fn(ext)
+        except TypeError:
+            return _err("GetAudioRenderCodecs is not callable on this build.")
+        if not res:
+            return _err(
+                f"GetAudioRenderCodecs('{ext}') returned nothing — pass an "
+                "extension from audio_formats (e.g. wav, mov, mxf, flac)."
+            )
+        return _ok(format_extension=ext, codecs=res)
+
+    if action in ("transcription", "set_transcription"):
+        cid = p.get("clip_id")
+        if not cid:
+            return _err(f"{action} needs clip_id.")
+        clip = _find_clip_recursive(mp.GetRootFolder(), cid)
+        if not clip:
+            return _err(f"No media pool clip with id '{cid}'.")
+
+        if action == "transcription":
+            fn = getattr(clip, "GetTranscription", None)
+            if fn is None:
+                return _err("This build does not expose MediaPoolItem.GetTranscription.")
+            try:
+                res = fn(bool(p.get("use_nested", False)))
+            except TypeError:
+                return _err("GetTranscription is not callable on this build.")
+            if not res:
+                return _ok(
+                    transcription=None,
+                    note=(
+                        "This clip has no transcript yet. Create one in the "
+                        "Edit page (AI Transcription) or via the timeline_ai "
+                        "tool, then read it here."
+                    ),
+                )
+            return _ok(transcription=res)
+
+        # set_transcription
+        tr = p.get("transcription")
+        if not isinstance(tr, dict) or "segments" not in tr:
+            return _err(
+                "set_transcription needs transcription={'language': …, "
+                "'segments': [{'start': '01:00:02:05', 'end': …, 'text': …}, …]}. "
+                "Timecodes are absolute strings."
+            )
+        segs = tr.get("segments")
+        if not isinstance(segs, list) or not segs:
+            return _err("transcription['segments'] must be a non-empty list.")
+        for i, s in enumerate(segs):
+            if not isinstance(s, dict) or not all(k in s for k in ("start", "end", "text")):
+                return _err(
+                    f"segment {i} needs start, end and text "
+                    f"(got keys {sorted(s) if isinstance(s, dict) else type(s).__name__})."
+                )
+        fn = getattr(clip, "SetTranscription", None)
+        if fn is None:
+            return _err("This build does not expose MediaPoolItem.SetTranscription.")
+        try:
+            ok = fn(tr)
+        except TypeError:
+            return _err("SetTranscription is not callable on this build.")
+        if not ok:
+            return _err(
+                "SetTranscription returned False. The timecodes must lie inside "
+                "the clip and be absolute strings ('01:00:02:05')."
+            )
+        # verify by reading back — do not trust the call
+        check = getattr(clip, "GetTranscription", None)
+        verified = None
+        want = segs[0].get("text")
+        if check:
+            got = check(False) or {}
+            gsegs = got.get("segments") or []
+            verified = bool(gsegs) and (gsegs[0].get("text") == want)
+            return _ok(segments_written=len(segs), verified=verified,
+                       read_back=gsegs[:2],
+                       note=None if verified else
+                       "The call reported success but the first segment's text "
+                       "did not read back as written — treat as unverified.")
+        return _ok(segments_written=len(segs), verified=None,
+                   note="Could not read back (GetTranscription unavailable).")
+
+    return _err(
+        f"Unknown action '{action}'. Use capabilities, render_presets, "
+        "update_render_preset, quick_export_enable, audio_formats, "
+        "audio_codecs, transcription or set_transcription."
+    )
+
+
 if __name__ == "__main__":
     mcp.run()

@@ -6,14 +6,19 @@ properties, Paste-Attributes, frame export and media-pool folder lookups.
 
 It is deliberately an **extension, not a replacement**: run it alongside
 [`samuelgursky/davinci-resolve-mcp`](https://github.com/samuelgursky/davinci-resolve-mcp)
-(or any other) and you get a larger surface with no overlap.
+(or any other) and you get a larger surface with no overlap. Everything it
+exposes is measured against a live Resolve, and calls that turn out to be broken
+are reported as broken rather than wrapped in a success.
 
 ```
 effects              apply/list/remove/toggle/reorder clip effects
 clip_attrs           copy attributes between clips (Paste Attributes)
 export_frame         stills from a clip or media-pool item
 folder_ops           which bin does this clip/folder live in
-clip_position        read placement + handle offsets; flags two broken APIs
+photo_albums         albums, photos, ratings, flags, versions, stills
+node_graph           node labels, colours, enable state, LUTs, cache
+project_extras       render presets, audio render formats, transcription
+clip_position        read placement + handle offsets; flags broken APIs
 resolve_ext_status   health check
 ```
 
@@ -34,6 +39,11 @@ stub documents the API; only the live object proves your build has it).
 | `MediaPoolItem.GetParentFolder` / `Folder.GetParentFolder` | absent |
 | `TimelineItem.Get/SetLeftOffset` / `GetPosition` | absent |
 | `Timeline.MoveItems` / `DeleteGaps` / `Get/SetIsEnabled` | absent |
+| **Photo Album APIs** (`PhotoAlbum`, `PhotoAlbumItem`, 53 methods) | absent |
+| `Graph.SetNodeLabel` / `Get/SetNodeColor` / `SetNodeEnabled` | absent |
+| `Project.GetAudioRenderFormats` / `GetAudioRenderCodecs` | absent |
+| `Project.UpdateRenderPreset` / `SetQuickExportEnabledForRenderPreset` | absent |
+| `MediaPoolItem.SetTranscription` | absent |
 
 `TimelineItem` alone exposes **113 methods** on 21.1.2; a large share of them
 were unreachable through MCP before this server.
@@ -150,6 +160,70 @@ path(clip_id?|folder_id?)            "Master/Sub/Bin"
 find_clip(clip_id)                   locate a clip anywhere in the tree
 ```
 
+### `photo_albums`
+
+```
+list() / current() / set_current(album_id?|name?)
+create(name) / create_from_photos(name, clip_ids) / delete(album_ids?) / rename(...)
+quick_export_presets() / render_settings(settings?)
+photos(album_id?|name?) / add_photos(clip_ids) / remove_photos(photo_ids) / current_item()
+stills(album_id?|name?, all_photos?)
+photo(photo_id) / rate(photo_id, stars) / flag(photo_id, color?|clear?)
+clip_color(photo_id, color?|clear?) / versions(photo_id)
+add_version / load_version / delete_version
+copy_grade / effects_list / effect_apply / effect_remove / fusion_comps / fusion_add
+```
+
+Verified working on 21.1.2.10: **9/9 `PhotoAlbum` methods, 20/20
+`PhotoAlbumItem` methods**, `CreatePhotoAlbumFromPhotos`, persistent ratings /
+flags / versions, `AddFusionComp` on a photo.
+
+`add_photos` is **broken upstream** (`AddToPhotoAlbum` adds nothing) — the
+action verifies by reading the album back and tells you so. Use
+**`create_from_photos`**, which is the verified path.
+
+> Note the split: the album *listing* methods live on `Project`, the
+> *creating/adding* ones on `MediaPool`, and Resolve answers none of them. The
+> tool resolves the right object per call, because a Resolve proxy makes
+> `hasattr` report every method on every object.
+
+### `node_graph`
+
+```
+info(item_id?|name?|photo_id?)        node list with labels and colours
+label(node_index, label)              "" clears the label
+color(node_index, color)              "" clears the colour
+enable(node_index, enabled)
+tools(node_index)                     which Fusion/OFX tools sit in the node
+lut(node_index, lut_path?)            read, or set
+cache(node_index, mode?)              read, or set
+reset_colors()                        photo graphs only
+reset_grades(confirm=true)            destructive — clears the whole grade
+```
+
+Valid node colours: Orange, Apricot, Yellow, Lime, Olive, Green, Teal, Navy,
+Blue, Purple, Violet, Pink, Tan, Beige, Brown, Chocolate.
+
+Target a timeline clip by `item_id`/`name`, or a photo by `photo_id`. Labels
+and colours verified persistent across calls.
+
+### `project_extras`
+
+```
+capabilities()                             what this build answers at all
+render_presets()                           GetRenderPresetList
+update_render_preset(preset_name)          GUI-dependent, see the broken table
+quick_export_enable(preset_name, enabled)  GUI-dependent
+audio_formats()                            {display name -> extension}
+audio_codecs(format_extension)             {description -> codec name}
+transcription(clip_id, use_nested?)        a clip's transcript
+set_transcription(clip_id, transcription)  verified by reading back
+```
+
+`audio_formats` / `audio_codecs` VERIFIED: 7 real formats
+(`FLAC, MP3, MP4, MXF OP-Atom, MXF OP1A (IMF), QuickTime, Wave`) and their
+codecs. `render_presets` VERIFIED: 37 real presets.
+
 ### `clip_position`
 
 ```
@@ -164,7 +238,7 @@ or destructive on 21.1.2. See the next section.
 ## Measured behaviour on Resolve 21.1.2.10
 
 Everything below was measured against a live Studio build, not read from docs.
-`tests/test_e2e.py` reproduces all of it — 33 assertions, 0 failures.
+`tests/` reproduces all of it — 86 assertions across three suites, 0 failures.
 
 **Working**
 
@@ -187,6 +261,13 @@ Everything below was measured against a live Studio build, not read from docs.
 | `Timeline.ExportFrame` | `frameOffset is out of range for the timeline` for every offset tried (0, 5, 100, 200, 216000, 216010) on a timeline whose items start at frame 0 — while the same frames export fine through `TimelineItem.ExportFrame`. |
 | `Timeline.DeleteGaps` | Returns `True` and moves nothing — a silent no-op. |
 | `TimelineItem.SetLeftOffset` | **Destructive.** On a clip at frame 400 with duration 120, `SetLeftOffset(5)` moved it to **-85995** and inflated the duration to **86515** frames: it *extends the clip from source media*, it does not nudge the edit point. Setting the offset back to `0` did **not** restore the original position (the clip stayed at -86000). There is no API-level undo. |
+| `MediaPool.AddToPhotoAlbum` | Adds nothing and returns an empty list. Tested four ways: immediately after `CreateEmptyPhotoAlbum`, with a 2 s pause, after an explicit `SetCurrentPhotoAlbum` that `GetCurrentPhotoAlbum` confirmed, and with a fresh album each time — zero photos every run. `MediaPool.CreatePhotoAlbumFromPhotos` VERIFIED working (photos land and read back), so use that. |
+| `Graph.ResetAllNodeColors` | Exists on a photo album item's graph but **not** on a timeline clip's graph (`NoneType is not callable`). Clearing a colour with `SetNodeColor(i, "")` works on both. |
+| `MediaPoolItem.GetNodeGraph` | Not callable on 21.1.2.10 (while `TimelineItem.GetNodeGraph` and `PhotoAlbumItem.GetNodeGraph` both work). Put the clip on a timeline and address it by `item_id`. |
+| `Project.UpdateRenderPreset` | Returns `False` for all 37 factory presets that `GetRenderPresetList` reports (`'H.264 Master'` included). `Project.SaveRenderPreset` does not exist in the API, so a user preset cannot be created from scripting to test against. GUI-dependent at best. |
+| `Project.SetQuickExportEnabledForRenderPreset` | Same shape: `False` for a factory preset. |
+| `MediaPoolItem.SetTranscription` | Returns `False` for a PNG still **and** for a real video clip with no transcript, with both `'01:00:00:00'` and `'00:00:00:00'` start timecodes. It *replaces* a transcript, so it appears unable to create one where none exists. |
+| `MediaPoolItem.SetClipColor` (photo items) | Returned `False` for `'Sky'` on a photo album item while the colour list is documented; `ClearClipColor` works. The action reports the rejection rather than assuming success. |
 
 **Gotchas**
 
@@ -205,16 +286,26 @@ Everything below was measured against a live Studio build, not read from docs.
 
 ```bash
 # requires Resolve running plus the env vars exported
-python tests/test_e2e.py
+python tests/test_e2e.py        # core tools
+python tests/test_phase1.py     # photo albums + node graph
+python tests/test_extras.py     # render presets, audio formats, transcription
 
 # point at your own media if ~/Pictures has fewer than 3 PNGs
-RESOLVE_EXT_TEST_MEDIA="D:/stills/*.png" python tests/test_e2e.py
+RESOLVE_EXT_TEST_MEDIA="D:/stills/*.png" python tests/test_phase1.py
 ```
 
-The suite creates a scratch project (`ZZ_ExtFull`), exercises every tool and
-deletes it again. It never touches your other projects. Assertions check that
-values **changed**, not merely that no error was returned — a write test that
-passes because nothing moved proves nothing.
+**86 assertions, 0 failures** against Resolve Studio 21.1.2.10.
+
+Each suite creates its own scratch project, exercises the tools and deletes it
+again — they never touch your other projects. Two habits are deliberate:
+
+- Assertions check that values **changed and read back**, not merely that no
+  error was returned. A write test that passes because nothing moved proves
+  nothing; that is exactly how `DeleteGaps` and `AddToPhotoAlbum` were caught
+  reporting success while doing nothing.
+- Known-broken calls are asserted to *fail honestly*. If a future Resolve build
+  fixes `AddToPhotoAlbum`, its test will start failing — which is the signal to
+  re-measure and update this README, not a broken test.
 
 ## Design notes
 
