@@ -1,0 +1,36 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.CaptRauti/resolve-ext",
+  "description": "Resolve MCP gaps: clip effects, Paste Attributes, frame export, photo albums, camera layouts.",
+  "title": "ResolveMCP-ext",
+  "websiteUrl": "https://github.com/CaptRauti/ResolveMCP-ext",
+  "repository": {
+    "url": "https://github.com/CaptRauti/ResolveMCP-ext",
+    "source": "github"
+  },
+  "version": "1.0.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "resolve-ext",
+      "version": "1.0.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "RESOLVE_SCRIPT_API",
+          "description": "Path to the DaVinci Resolve scripting API folder. Optional: the server locates it automatically on Windows, macOS and Linux, and only uses this when set to an existing path.",
+          "isRequired": false
+        },
+        {
+          "name": "RESOLVE_SCRIPT_LIB",
+          "description": "Path to fusionscript.dll / fusionscript.so. Optional for the same reason.",
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}
