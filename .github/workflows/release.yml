@@ -88,10 +88,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          gh release create "$TAG" \
-            --title "resolve-ext $TAG" \
-            --generate-notes \
-            dist/*
+          # Idempotent: re-running for a tag that already has a release
+          # replaces its assets instead of failing the whole workflow. That
+          # matters when the build is fine but a downstream job (PyPI) was
+          # not configured yet and the release has to be re-triggered.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — replacing its assets."
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" \
+              --title "resolve-ext $TAG" \
+              --generate-notes \
+              dist/*
+          fi
 
       - name: Release URL
         env:
