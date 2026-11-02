@@ -4,6 +4,50 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — 2026-11-01
+
+### Fixed
+
+**Three calls were documented as broken on the strength of a bad measurement.**
+All three were re-measured on the same build, Resolve Studio 21.1.2.10, and all
+three work.
+
+The root cause was the test setup, not the API. `AppendToTimeline`'s
+`recordFrame` is an **absolute** timeline frame, not an offset from the timeline
+start. The harness fed it `0/200/400` on a timeline starting at `86400`, so the
+clips landed outside the timeline's own range and the timeline reported
+`StartFrame == EndFrame` (duration 0) while holding three clips. Every
+timeline-relative call then behaved as if the timeline were empty.
+
+- **`Timeline.ExportFrame`** — works. `frameOffset` is relative to the timeline
+  start, valid `0..duration-1`; offsets 0..479 succeed on a 480-frame timeline
+  and 480 is refused. An absolute frame is always refused, which reads like a
+  failure. The action now explains that instead of reporting a defect.
+- **`Timeline.DeleteGaps`** — works. Verified `[86400, 86600, 86800]` →
+  `[86400, 86520, 86640]`, gaps closed. It does nothing only on a timeline whose
+  metadata contradicts its contents, and the error now says so.
+- **`Timeline.AddMarker`** — works at relative frame 0. The call that returns
+  `True` and writes nothing is `TimelineItem.AddMarker` on the clip at timeline
+  position 0, verified by reading `tl.GetMarkers()` back. Markers are placed
+  through the timeline, never through the item.
+
+### Added
+
+- `AppendToTimeline` accepting a `recordFrame` below `GetStartFrame()` is now
+  documented as a silent footgun, with the symptom it produces.
+- The `export_frame` timeline action detects an absolute offset and names the
+  relative one it should have been.
+
+### Changed
+
+- `tests/test_e2e.py` anchors its `recordFrame` values to the real start frame,
+  and the `delete_gaps` and `timeline` export assertions now check that the call
+  **works** rather than that it fails.
+
+Reported upstream in [issue #336][336] with the correction attached.
+
+[336]: https://github.com/samuelgursky/davinci-resolve-mcp/issues/336
+
 ## [1.0.0] — 2026-11-01
 
 First release. Nine MCP tools covering DaVinci Resolve scripting surfaces the
@@ -53,9 +97,11 @@ instead of passing a false success to the caller.
 
 - `TimelineItem.SetPosition` and `Timeline.MoveItems` return `False` for every
   input, including a no-op.
-- `Timeline.ExportFrame` fails for every `frameOffset`, while the same frames
-  export fine through `TimelineItem.ExportFrame`.
-- `Timeline.DeleteGaps` returns `True` and moves nothing.
+- ~~`Timeline.ExportFrame` fails for every `frameOffset`, while the same frames
+  export fine through `TimelineItem.ExportFrame`.~~ **Wrong — corrected in
+  1.0.1.** The function works; a relative offset is required.
+- ~~`Timeline.DeleteGaps` returns `True` and moves nothing.~~ **Wrong —
+  corrected in 1.0.1.** It works on a timeline whose metadata is consistent.
 - `TimelineItem.SetLeftOffset` is destructive: on a clip at frame 400 with
   duration 120 it moved the clip to -85995 and inflated the duration to 86515
   frames. It extends the clip from source media; it does not nudge the edit
@@ -70,8 +116,10 @@ instead of passing a false success to the caller.
   return `False` for all 37 factory presets.
 - `MediaPoolItem.SetTranscription` returns `False` for a clip with no
   existing transcript.
-- `Timeline.AddMarker` cannot place a marker on the clip at timeline
-  position 0.
+- ~~`Timeline.AddMarker` cannot place a marker on the clip at timeline
+  position 0.~~ **Imprecise — corrected in 1.0.1.** `Timeline.AddMarker` works;
+  it is `TimelineItem.AddMarker` on that clip that returns `True` and writes
+  nothing.
 - `AppendToTimeline` with `startFrame == endFrame` returns `None` — which
   affects single-frame media whose natural `endFrame` is 0.
 - `SetProperty("PositionX"/"PositionY")` is silently ignored; the real keys are

@@ -21,7 +21,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 # --- locating DaVinci Resolve --------------------------------------------
 #
@@ -954,8 +954,13 @@ def clip_position(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[
         it EXTENDS the clip from source media. Measured: a clip at frame 400
         with duration 120 became start=-85995, duration=86515 after
         SetLeftOffset(5), and could not be restored by setting 0.
-      delete_gaps() — DeleteGaps reports success but moves nothing (verified
-        twice). The action says so instead of pretending.
+      delete_gaps() — closes the gaps between clips so they sit back to back.
+        **Verified working** on a timeline whose StartFrame/EndFrame agree with
+        its contents. It appeared to be a silent no-op in an earlier release;
+        that measurement ran on a timeline whose metadata contradicted its
+        contents (StartFrame == EndFrame while holding three clips). The action
+        compares the clip starts before and after and reports the real outcome
+        either way.
 
     Addressing: `item_id` (GetUniqueId) or `name` on a track. Track defaults
     video/1. Frame numbers are absolute timeline frames, not timecode.
@@ -1107,14 +1112,20 @@ def clip_position(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[
         after = [(i.GetName(), i.GetStart()) for i in (tl.GetItemListInTrack(track_type, track_index) or [])]
         changed = before != after
         if not changed:
+            # Corrected: DeleteGaps is NOT a silent no-op. It works, but it
+            # does nothing on a timeline whose metadata contradicts its
+            # contents - which is what happens when AppendToTimeline is fed
+            # absolute recordFrame values below StartFrame.
             return _err(
-                f"DeleteGaps returned {ok!r} but NOTHING moved — the items still "
-                f"start at {[s for _, s in after]}. MEASURED on Resolve "
-                "21.1.2.10: DeleteGaps reports success while leaving the "
-                "timeline untouched (tested with clips at frames 0 and 200 and "
-                "again at 0/200/400, gaps present). It is a silent no-op on "
-                "this build; do not trust its return value. Close gaps in the "
-                "Edit page instead."
+                f"DeleteGaps returned {ok!r} but nothing moved — the items still "
+                f"start at {[s for _, s in after]}. On this build that happens "
+                "when the timeline's metadata contradicts its contents: a "
+                "timeline built with AppendToTimeline using absolute recordFrame "
+                "values below StartFrame reports StartFrame == EndFrame (duration "
+                "0) while still holding clips, and SetLeftOffset/DeleteGaps then "
+                "have nothing valid to act on. Check GetStartFrame()/GetEndFrame() "
+                "and rebuild the timeline with recordFrame >= the start frame. "
+                "Nothing was changed by this call."
             )
         return _ok(deleted=True, items_before=len(before), items_after=len(after),
                    starts_before=[s for _, s in before], starts_after=[s for _, s in after])
@@ -1167,11 +1178,14 @@ def export_frame(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[s
         — MediaPoolItem.ExportFrame. Also verified working; offset is 0-based
           from the SOURCE start, ignoring the timeline.
       timeline(frame_offset, …)
-        — Timeline.ExportFrame. **BROKEN on Resolve 21.1.2.10** — it returns
-          'frameOffset is out of range for the timeline' for every offset
-          tried (0, 5, 100, 200, 216000, 216010), while the same frames export
-          fine through 'item'. The action reports this instead of failing
-          silently; use 'item' or 'media'.
+        — Timeline.ExportFrame. Offset is **0-based from the TIMELINE start**
+          (`StartFrame`), valid `0 .. (EndFrame - StartFrame - 1)`.
+          Verified on 21.1.2.10 against a 480-frame timeline: offsets 0..479
+          succeed, 480 is refused with 'frameOffset is out of range'.
+          An absolute frame (e.g. the value from `GetStartFrame()`) is ALWAYS
+          refused, which reads like a failure but is correct behaviour. An
+          earlier release documented that rejection as a defect; that was a
+          wrong measurement on an empty timeline, corrected here.
 
     Parameters:
       output_type  'file' (needs file_path) or 'encodedString' (default).
@@ -1239,16 +1253,28 @@ def export_frame(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[s
         off = int(p.get("frame_offset", 0))
         res = tl.ExportFrame(off, opts) or {}
         if not res.get("success"):
+            # The offset is RELATIVE to the timeline start, which is the single
+            # most common way to get this wrong (passing GetStartFrame()).
+            # An earlier release reported the resulting rejection as a defect;
+            # it is correct behaviour, so explain it instead.
+            sf, ef = tl.GetStartFrame(), tl.GetEndFrame()
+            dur = (ef - sf) if (sf is not None and ef is not None) else None
+            if sf is not None and off >= sf:
+                hint = (
+                    f" The offset looks ABSOLUTE: {off} was passed while the "
+                    f"timeline starts at frame {sf}. Use an offset RELATIVE to "
+                    f"the timeline start — {off - sf} would be the same frame."
+                )
+            elif dur is not None and off >= dur:
+                hint = (f" The offset must be below the timeline duration "
+                        f"({dur} frames): valid range is 0..{dur - 1}.")
+            elif dur is not None:
+                hint = f" Valid range on this timeline is 0..{dur - 1}."
+            else:
+                hint = ""
             return _err(
                 f"Timeline.ExportFrame(frameOffset={off}) failed: "
-                f"{res.get('error')}. MEASURED on Resolve 21.1.2.10: this call "
-                "returns 'frameOffset is out of range for the timeline' for "
-                "EVERY offset tried (0, 5, 100, 200, 216000, 216010) on a "
-                "timeline whose items start at frame 0. The timeline reports "
-                "StartTimecode 01:00:00:00 with StartFrame 86400, which looks "
-                "like the underlying cause. Treat Timeline.ExportFrame as "
-                "BROKEN on this build. Use action='item' (verified working) or "
-                "action='media' instead."
+                f"{res.get('error')}.{hint}"
             )
         return _wrap(res, f"timeline frame_offset={off}")
 
@@ -2594,14 +2620,18 @@ def camera_comparison(action: str, params: Optional[Dict[str, Any]] = None) -> D
         added, by_camera, failed = 0, {}, []
 
         def _marker_at(frame_id, color, name, note, dur):
-            """AddMarker is unreliable about the frame base — try both.
+            """Place a timeline marker, tolerating both frame bases.
 
-            MEASURED on 21.1.2.10: a marker on the clip at timeline position 0
-            returns False when addressed relatively (frameId 0) but True when
-            addressed with the timeline's absolute start frame (86400 on a
-            timeline whose StartTimecode is 01:00:00:00). Other clips answered
-            to the relative frame. So try relative, then absolute, then report
-            the failure rather than assuming either.
+            CORRECTED on re-measurement (verified by reading tl.GetMarkers()
+            back, not by the return value): Timeline.AddMarker(0) DOES work.
+            An earlier version of this file claimed the clip at timeline
+            position 0 refused a relative frame; that was a bad measurement.
+            The call that returns True and writes nothing is
+            TimelineItem.AddMarker on that same clip — which is why markers
+            here go through the TIMELINE, never through the item.
+
+            The relative frame is tried first and the absolute frame kept as a
+            fallback, because neither base is documented anywhere.
             """
             base = int(tl.GetStartFrame() or 0)
             for candidate, label in ((int(frame_id), "relative"),

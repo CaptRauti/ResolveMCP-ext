@@ -73,9 +73,18 @@ items = mp.ImportMedia(imgs)
 tl = mp.CreateEmptyTimeline("TLFull")
 proj.SetCurrentTimeline(tl)
 tl = proj.GetCurrentTimeline()
-mp.AppendToTimeline([{"mediaPoolItem": items[0], "trackIndex": 1, "recordFrame": 0},
-                     {"mediaPoolItem": items[1], "trackIndex": 1, "recordFrame": 200},
-                     {"mediaPoolItem": items[2], "trackIndex": 1, "recordFrame": 400}])
+
+# AppendToTimeline's recordFrame is an ABSOLUTE timeline frame, NOT an offset
+# from the timeline start. Passing 0/200/400 while this timeline starts at
+# 86400 placed the clips BEFORE its own start; the timeline then reported
+# StartFrame == EndFrame (duration 0) while still holding three clips, and
+# Timeline.ExportFrame correctly refused every offset. That combination is what
+# produced the wrong upstream bug report (Issue #336) - so this now anchors to
+# the real start frame.
+TL0 = int(tl.GetStartFrame() or 0)
+mp.AppendToTimeline([{"mediaPoolItem": items[0], "trackIndex": 1, "recordFrame": TL0},
+                     {"mediaPoolItem": items[1], "trackIndex": 1, "recordFrame": TL0 + 200},
+                     {"mediaPoolItem": items[2], "trackIndex": 1, "recordFrame": TL0 + 400}])
 v1 = tl.GetItemListInTrack("video", 1) or []
 print(f"\nSetup: Projekt={proj.GetName()}  TL={tl.GetName()}  Items V1={len(v1)}")
 for i, it in enumerate(v1):
@@ -128,26 +137,52 @@ r = show("set_offset (erwartet Verweigerung)", S.clip_position("set_offset", {"i
 check("set_offset wird verweigert", "error" in r and "DISABLED" in r["error"])
 check("set_offset hat nichts veraendert", a.GetStart() == start_before, f"{start_before} -> {a.GetStart()}")
 
-# delete_gaps: meldet Erfolg, aendert aber nichts -> ehrlicher Fehler erwartet
+# delete_gaps: KORRIGIERT. Die erste Fassung dieses Tests erwartete, dass
+# DeleteGaps einen Fehler meldet - gestuetzt auf eine Messung, die auf einer
+# Timeline mit widerspruechlichen Metadaten lief (StartFrame == EndFrame bei
+# drei Clips, weil AppendToTimeline mit absoluten Frames gefuettert wurde).
+# Auf einer korrekt aufgebauten Timeline SCHLIESST DeleteGaps die Luecken.
 print("\n=== delete_gaps ===")
-starts = [i.GetStart() for i in (tl.GetItemListInTrack("video", 1) or [])]
-check("Vorher gibt es Luecken", (starts[1] - starts[0] > 0) if len(starts) > 1 else False, f"starts={starts}")
-r = show("delete_gaps (erwartet Defekt)", S.clip_position("delete_gaps", {}))
-check("delete_gaps deckt die stille Falschmeldung auf",
-      "error" in r and "NOTHING moved" in r["error"], str(r.get("error"))[:90])
+clips_before = tl.GetItemListInTrack("video", 1) or []
+starts = [i.GetStart() for i in clips_before]
+clip_dur = (clips_before[0].GetEnd() - clips_before[0].GetStart()) if clips_before else 0
+# Eine Luecke ist mehr Abstand als die Clip-Laenge - nicht 'mehr als 0'.
+check("Vorher gibt es Luecken",
+      (starts[1] - starts[0] > clip_dur) if len(starts) > 1 else False,
+      f"starts={starts} clip_dur={clip_dur}")
+r = show("delete_gaps (erwartet Erfolg)", S.clip_position("delete_gaps", {}))
 after_starts = [i.GetStart() for i in (tl.GetItemListInTrack("video", 1) or [])]
-check("delete_gaps hat nichts verfaelscht", after_starts == starts, f"{starts} -> {after_starts}")
+check("delete_gaps schliesst die Luecken tatsaechlich",
+      len(after_starts) == len(starts) and after_starts != starts,
+      f"{starts} -> {after_starts}")
+check("delete_gaps ergibt lueckenlose Clips",
+      all(b - a == clip_dur for a, b in zip(after_starts, after_starts[1:]))
+      if len(after_starts) > 1 else False,
+      f"Abstaende={[b - a for a, b in zip(after_starts, after_starts[1:])]} clip_dur={clip_dur}")
 
 # ---------------------------------------------------------------- export_frame (NEW)
 print("\n=== export_frame ===")
 outdir = OUTDIR
 os.makedirs(outdir, exist_ok=True)
 
-# timeline: BROKEN -> muss ehrlich melden
-r = show("timeline (erwartet Defekt)", S.export_frame("timeline", {"frame_offset": 10,
-                                                                  "output_type": "file",
-                                                                  "file_path": os.path.join(outdir, "timeline.png")}))
-check("Timeline.ExportFrame meldet den Defekt ehrlich", "error" in r and "BROKEN" in r["error"])
+# timeline: erwartet einen RELATIVEN Offset (0 = Timeline-Start).
+# Korrektur gegenueber der ersten Fassung: die Funktion ist NICHT defekt —
+# eine frueher hier behauptete Defektmessung hatte absolute Frames uebergeben.
+tlpath = os.path.join(outdir, "timeline.png")
+if os.path.exists(tlpath):
+    os.remove(tlpath)
+r = show("timeline -> relativer Offset 10", S.export_frame(
+    "timeline", {"frame_offset": 10, "output_type": "file", "file_path": tlpath}))
+check("Timeline.ExportFrame schrieb eine Datei", os.path.exists(tlpath),
+      f"{os.path.getsize(tlpath)} bytes" if os.path.exists(tlpath) else "fehlt")
+
+# Ein absoluter Frame muss abgelehnt werden UND das erklaeren, nicht als
+# undurchsichtiger 'out of range' durchkommen.
+r = show("timeline -> absoluter Frame (erwartet Erklaerung)", S.export_frame(
+    "timeline", {"frame_offset": TL0, "output_type": "file",
+                 "file_path": os.path.join(outdir, "tl_abs.png")}))
+check("absoluter Offset wird erklaerend abgelehnt",
+      "error" in r and "ABSOLUTE" in r.get("error", ""), r.get("error", "")[:90])
 
 # item: WORKS
 ipath = os.path.join(outdir, "item.jpg")
