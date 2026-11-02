@@ -78,6 +78,10 @@ jobs:
               data = json.load(r)
           servers = data.get("servers") or []
           print(f"servers matching {name}: {len(servers)}")
+          # The API nests each entry under a "server" key. Reading the top
+          # level gives None, which looked like a failed publish when the
+          # entry was in fact there.
           for s in servers:
-              print(" ", s.get("name"), s.get("version"))
+              inner = s.get("server", s)
+              print(" ", inner.get("name"), inner.get("version"))
           PY
