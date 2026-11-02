@@ -1,0 +1,83 @@
+name: registry
+
+# Publishes server.json to the official MCP registry.
+#
+# Why OIDC and not a token: the registry verifies that whoever publishes
+# io.github.CaptRauti/resolve-ext actually controls that GitHub repository.
+# `login github-oidc` proves that with a short-lived token minted by GitHub
+# Actions for this workflow run - no secret to store, nothing to rotate, and
+# no interactive device flow. That is only possible inside Actions, which is
+# why this lives here and not in a local script.
+#
+# The registry also checks that the package named in server.json exists on
+# PyPI before it accepts the entry, so this must run after the release job
+# has published. The `release: published` trigger handles that ordering.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: publish to the MCP registry
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Fetch mcp-publisher
+        # Pinned by version, not "latest": a registry tool that changes under
+        # us mid-release would be a poor thing to depend on.
+        run: |
+          VERSION=v1.8.7
+          curl -sSfL "https://github.com/modelcontextprotocol/registry/releases/download/${VERSION}/mcp-publisher_linux_amd64.tar.gz" \
+            | tar xz mcp-publisher
+          chmod +x mcp-publisher
+          ./mcp-publisher --help | head -12
+
+      - name: Check server.json before touching the registry
+        # `validate` is a dry run against the live registry schema. A malformed
+        # server.json should fail here, before authentication, so the error
+        # says what is wrong with the file rather than "not authorised".
+        run: ./mcp-publisher validate
+
+      - name: Confirm the package really is on PyPI
+        # The registry rejects an entry whose package cannot be resolved. Fail
+        # here with a clear message instead of letting publish report it.
+        run: |
+          python - <<'PY'
+          import json, sys, urllib.request
+          name = json.load(open("server.json"))["packages"][0]["identifier"]
+          url = f"https://pypi.org/pypi/{name}/json"
+          try:
+              with urllib.request.urlopen(url, timeout=20) as r:
+                  info = json.load(r)["info"]
+          except Exception as e:
+              sys.exit(f"ERROR: {name} not resolvable on PyPI ({e}). Publish it first.")
+          print(f"ok: {info['name']} {info['version']} is on PyPI")
+          PY
+
+      - name: Log in with GitHub OIDC
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish
+        run: ./mcp-publisher publish
+
+      - name: Show what the registry now holds
+        # Reading the entry back is the only proof that the publish landed.
+        run: |
+          python - <<'PY'
+          import json, urllib.request, urllib.parse
+          name = json.load(open("server.json"))["name"]
+          url = "https://registry.modelcontextprotocol.io/v0/servers?search=" + urllib.parse.quote(name)
+          with urllib.request.urlopen(url, timeout=20) as r:
+              data = json.load(r)
+          servers = data.get("servers") or []
+          print(f"servers matching {name}: {len(servers)}")
+          for s in servers:
+              print(" ", s.get("name"), s.get("version"))
+          PY
