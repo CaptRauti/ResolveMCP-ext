@@ -1,0 +1,62 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  offline:
+    name: ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+
+      - name: Offline checks
+        # No DaVinci Resolve on CI, so this suite deliberately covers only
+        # what can be verified without it: import, CLI, tool registration,
+        # platform path resolution and pure helpers. The live suites
+        # (test_e2e, test_phase1, test_extras, test_camera) need a running
+        # Resolve Studio and are run locally.
+        run: python tests/test_offline.py
+
+      - name: Console script is installed and works
+        run: |
+          resolve-ext --version
+          resolve-ext --help
+
+      - name: Package builds
+        run: |
+          pip install build
+          python -m build
+
+  live-skip-notice:
+    name: live suites (informational)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Explain what is not covered here
+        run: |
+          echo "The live suites need a running DaVinci Resolve Studio and are"
+          echo "therefore not part of CI:"
+          echo "  tests/test_e2e.py      core tools"
+          echo "  tests/test_phase1.py   photo albums + node graph"
+          echo "  tests/test_extras.py   render presets, audio, transcription"
+          echo "  tests/test_camera.py   camera layouts, labels, markers"
+          echo "Run them locally with Resolve open; see README.md."

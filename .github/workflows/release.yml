@@ -1,0 +1,134 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v1.0.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+
+      - name: Check the tag matches the version in pyproject.toml
+        # A release whose wheel disagrees with its tag is a trap for whoever
+        # installs it later, so refuse rather than publish.
+        run: |
+          python - <<'PY'
+          import os, re, sys, tomllib
+          version = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+          ref = os.environ.get("GITHUB_REF_NAME", "")
+          print(f"pyproject version = {version}, tag = {ref}")
+          if ref.startswith("v") and ref[1:] != version:
+              sys.exit(f"ERROR: tag {ref} does not match version {version}")
+          print("ok")
+          PY
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Offline checks against the built wheel
+        # Install the WHEEL, not the checkout, so a packaging mistake (a file
+        # left out of the distribution) fails here instead of for a user.
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install --upgrade pip
+          /tmp/venv/bin/pip install dist/*.whl
+          /tmp/venv/bin/resolve-ext --version
+          /tmp/venv/bin/resolve-ext --help
+          /tmp/venv/bin/python - <<'PY'
+          import server
+          assert hasattr(server, "main"), "entry point missing"
+          assert server.main(["--version"]) == 0
+          paths = server.find_resolve_paths()
+          assert paths["platform"], "platform not detected"
+          print("wheel installs and runs:", server.__version__)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/*
+
+  release:
+    name: publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist
+
+      - name: List what will be published
+        run: ls -la dist/
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            --title "resolve-ext $TAG" \
+            --generate-notes \
+            dist/*
+
+      - name: Release URL
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: gh release view "$TAG" --json url --jq .url
+
+  pypi:
+    name: publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # Trusted Publishing: no API token, no repository secret. GitHub mints an
+    # OIDC token and PyPI exchanges it for a short-lived key scoped to this
+    # project. The trust relationship is configured once at
+    # https://pypi.org/manage/project/resolve-ext/settings/publishing/
+    # with exactly these three values:
+    #   Owner             CaptRauti
+    #   Repository name   ResolveMCP-ext
+    #   Workflow name     release.yml
+    # Renaming this file breaks publishing, because the filename is part of
+    # what PyPI matches against.
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist
+
+      - name: Show the identity PyPI will see
+        run: |
+          echo "repository_owner : ${{ github.repository_owner }}"
+          echo "repository       : ${{ github.repository }}"
+          echo "workflow         : ${{ github.workflow_ref }}"
+          echo "These three must match the Trusted Publisher on PyPI."
+
+      - name: Publish
+        # No password: the action detects the OIDC environment and mints its
+        # own short-lived token.
+        uses: pypa/gh-action-pypi-publish@release/v1
