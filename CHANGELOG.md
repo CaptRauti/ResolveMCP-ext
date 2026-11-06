@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] — 2026-11-06
+
+### Fixed
+
+**`resolve_ext_status` reported `TimelineItem.AddEffect` and
+`TimelineItem.CopyAttributes` as `false` with no clip selected, and probed the
+timeline with `hasattr()`.** Proxies make every attribute check pass, so the
+probe proved nothing. It now calls the methods it reports, which is the only
+reliable test on a proxy object (see "The Proxy Trap" in the README):
+
+- `Resolve.GetEffectsList` — called
+- `Timeline.GetItemListInTrack` — called on video track 1; `null` when no
+  timeline is open
+- `TimelineItem.GetProperty` / `GetFusionCompCount` — only when the track holds
+  an item, because they need a clip
+
+The old entries are gone rather than kept as placeholders: a surface that was
+never called should not be reported at all.
+
 ## [1.0.1] — 2026-11-01
 
 ### Fixed

@@ -21,7 +21,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 # --- locating DaVinci Resolve --------------------------------------------
 #
@@ -910,17 +910,24 @@ def resolve_ext_status() -> Dict[str, Any]:
     tl = proj.GetCurrentTimeline() if proj else None
     out["timeline"] = tl.GetName() if tl else None
 
-    probes = {
-        "Resolve.GetEffectsList": hasattr(app, "GetEffectsList"),
-        "TimelineItem.AddEffect": False,
-        "TimelineItem.CopyAttributes": False,
-    }
+    # hasattr() is worthless on Resolve proxies: every method name answers True
+    # on every object (see "The Proxy Trap" in the README). Probe by calling and
+    # looking at the result, which is the only reliable test.
+    probes: Dict[str, Any] = {}
+    probes["Resolve.GetEffectsList"] = _call_any([("Resolve", app)], "GetEffectsList")[0] is not None
     if tl:
-        items = tl.GetItemListInTrack("video", 1) or []
-        if items:
+        items = _call_any([("Timeline", tl)], "GetItemListInTrack", "video", 1)[0]
+        probes["Timeline.GetItemListInTrack"] = isinstance(items, list)
+        if isinstance(items, list) and items:
             it = items[0]
-            probes["TimelineItem.AddEffect"] = hasattr(it, "AddEffect")
-            probes["TimelineItem.CopyAttributes"] = hasattr(it, "CopyAttributes")
+            probes["TimelineItem.GetProperty"] = (
+                _call_any([("TimelineItem", it)], "GetProperty", "ZoomX")[0] is not None
+            )
+            probes["TimelineItem.GetFusionCompCount"] = (
+                _call_any([("TimelineItem", it)], "GetFusionCompCount")[0] is not None
+            )
+    else:
+        probes["Timeline.GetItemListInTrack"] = None
     out["surfaces"] = probes
     return _ok(**out)
 

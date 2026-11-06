@@ -1,6 +1,6 @@
 [project]
 name = "resolve-ext"
-version = "1.0.1"
+version = "1.0.2"
 description = "MCP server adding the DaVinci Resolve scripting surfaces mainstream MCP servers do not cover"
 readme = "README.md"
 requires-python = ">=3.10"
