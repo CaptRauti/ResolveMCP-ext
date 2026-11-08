@@ -271,10 +271,22 @@ _RESOLVE = None
 
 
 def _connect():
-    """Return the Resolve app object, or None. Cached after first success."""
+    """Return the Resolve app object, or None. Cached, but validated.
+
+    Resolve hands out a proxy that dies with the Resolve process: after a
+    Resolve restart, every call on a handle cached from the previous instance
+    raises ``'NoneType' object is not callable`` and the server looks broken
+    until it is restarted. So the cache is checked with a cheap call before it
+    is trusted and dropped when it is stale, which makes the server self-heal
+    across a Resolve restart.
+    """
     global _RESOLVE
     if _RESOLVE is not None:
-        return _RESOLVE
+        try:
+            _RESOLVE.GetProductName()
+            return _RESOLVE
+        except Exception:
+            _RESOLVE = None
     try:
         import DaVinciResolveScript as dvr
 

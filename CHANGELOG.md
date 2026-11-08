@@ -32,6 +32,15 @@ The mainstream server (4.19.3) covers none of these — `ExportThumbnails`,
 `ApplyAutoColor`, the extras manager and the ROI options score zero hits in its
 source.
 
+### Fixed
+
+**The server looked broken after a Resolve restart.** `_connect()` cached the
+Resolve app handle forever, but Resolve's proxy dies with the Resolve process —
+after a restart every call on the cached handle raised
+`'NoneType' object is not callable`, so even `resolve_ext_status` failed until
+the MCP server itself was restarted. The cache is now validated with a cheap
+call and dropped when stale, so the server reconnects on its own.
+
 ### Notes
 
 - `ImportMedia` with a path that does not exist hangs the scripting call on 21.2
