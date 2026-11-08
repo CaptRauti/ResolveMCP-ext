@@ -4,6 +4,41 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] — 2026-11-08
+
+### Added
+
+**DaVinci Resolve 21.2 coverage.** Three new tools, plus new options on an
+existing one. Every claim below was verified on Resolve Studio 21.2.0.6 with a
+real call *and* a readback, not from the type stubs:
+
+- **`thumbnails`** — `ExportThumbnails` on a timeline item, the timeline, a
+  media-pool item or a photo album: renders the frames you name into one
+  labelled grid image, to file or as an encoded string, and returns the sheet
+  geometry. `file_path` needs an image extension; frames may carry their own
+  labels.
+- **`auto_color`** — `ApplyAutoColor` / `GetAutoColorEnabled` /
+  `SetAutoColorEnabled` / `ClearAutoColor`. The Color page must be showing — on
+  Edit the identical calls return `False` and change nothing — so the tool
+  switches to Color itself and reports `page_switched_from`.
+- **`cdl`** — `GetCDL` / `SetCDL` on a clip's node. A set/read round-trip
+  returns exactly the values written. `GetCDL` needs the node index. Color page
+  required, same as `auto_color`.
+- **`export_frame`** — `roi_x`/`roi_y`/`roi_width`/`roi_height` (normalised,
+  0..1) and `quality`. A region of interest renders a cropped still without a
+  render pass: `roi 0.25/0.25/0.5/0.5` with `max_dimension=512` returns 512x288.
+
+The mainstream server (4.19.3) covers none of these — `ExportThumbnails`,
+`ApplyAutoColor`, the extras manager and the ROI options score zero hits in its
+source.
+
+### Notes
+
+- `ImportMedia` with a path that does not exist hangs the scripting call on 21.2
+  (the project is created, then the call blocks until the client times out) and
+  leaves Resolve's scripting socket wedged until Resolve is restarted. Check
+  paths before importing.
+
 ## [1.0.2] — 2026-11-06
 
 ### Fixed

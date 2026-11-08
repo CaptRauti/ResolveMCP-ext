@@ -21,7 +21,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 # --- locating DaVinci Resolve --------------------------------------------
 #
@@ -1200,6 +1200,14 @@ def export_frame(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[s
       format       'jpg' (default) or 'png' — only for output_type
                    'encodedString'.
       max_dimension  Cap the longer edge in pixels (default 0 = full size).
+      quality      JPEG quality 1-100 (default 100).
+      roi_x/roi_y/roi_width/roi_height  Normalised region of interest
+                   (0..1, fractions of the frame; default the whole frame).
+                   New in 21.2 — crop to a region without a render. The
+                   fractions are per-axis, so equal width/height is NOT a
+                   square region on a non-square frame. Verified live on
+                   21.2.0.6: roi 0.25/0.25/0.5/0.5 with max_dimension=512
+                   returns a 512x288 still.
 
     Returns for output_type='file': {success, path, bytes}.
     Returns for 'encodedString': {saved_to} — the base64 is decoded and
@@ -1223,6 +1231,14 @@ def export_frame(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[s
         opts["encodedImageFormat"] = p.get("format", "jpg")
     if p.get("max_dimension"):
         opts["maxDimension"] = int(p["max_dimension"])
+    if p.get("quality"):
+        opts["quality"] = int(p["quality"])
+    # 21.2: normalised region of interest (jpg/png only). Keys are roiX/roiY/
+    # roiWidth/roiHeight; omitting them keeps the whole frame.
+    for key, param in (("roiX", "roi_x"), ("roiY", "roi_y"),
+                       ("roiWidth", "roi_width"), ("roiHeight", "roi_height")):
+        if p.get(param) is not None:
+            opts[key] = float(p[param])
 
     def _wrap(res, label):
         res = res or {}
@@ -2882,6 +2898,314 @@ def camera_comparison(action: str, params: Optional[Dict[str, Any]] = None) -> D
         f"Unknown action '{action}'. Use detect, grid_2x2, split_h, split_v, "
         "layout, fullframe, markers, sort_to_bins, build_timeline or read."
     )
+
+
+# --- Resolve 21.2 additions ---------------------------------------------
+#
+# Measured live on DaVinci Resolve Studio 21.2.0.6 (08.11.2026) with a real
+# call AND a readback, never from the type stubs alone:
+#   ExportThumbnails  — writes a labelled grid (file or base64), reports the
+#                       sheet geometry; works on TimelineItem, Timeline and
+#                       MediaPoolItem (0-based offsets) and PhotoAlbum
+#                       (1-based photo positions).
+#   ApplyAutoColor / GetAutoColorEnabled / ClearAutoColor — round-trip.
+#   SetCDL / GetCDL  — round-trip; GetCDL needs the node index.
+# The upstream server (4.19.3) covers none of these.
+
+
+def _thumbnail_frames(raw):
+    """Normalise a frames list into the API's ThumbnailFrame form.
+
+    Accepts plain ints (offset only) or dicts with frameOffset/label.
+    Returns (frames, error).
+    """
+    if not isinstance(raw, list) or not raw:
+        return None, ("frames must be a non-empty list of ints or "
+                      "{frameOffset, label} dicts.")
+    out = []
+    for f in raw:
+        if isinstance(f, dict):
+            if "frameOffset" not in f:
+                return None, "a ThumbnailFrame dict needs 'frameOffset'."
+            entry = {"frameOffset": int(f["frameOffset"])}
+            if f.get("label") is not None:
+                entry["label"] = str(f["label"])
+            out.append(entry)
+        else:
+            out.append(int(f))
+    return out, None
+
+
+def _thumb_options(p):
+    """Build exportThumbnailsOptions. Returns (opts, error)."""
+    out_type = p.get("output_type", "encodedString")
+    opts = {"outputType": out_type}
+    if out_type == "file":
+        if not p.get("file_path"):
+            return None, "output_type='file' needs file_path (format from the extension)."
+        opts["filePath"] = p["file_path"]
+    else:
+        opts["encodedImageFormat"] = p.get("format", "jpg")
+    if p.get("max_dimension"):
+        opts["maxDimension"] = int(p["max_dimension"])
+    if p.get("quality"):
+        opts["quality"] = int(p["quality"])
+    return opts, None
+
+
+def _thumb_wrap(res, label, p, out_type):
+    """Turn an ExportThumbnailsResult into the tool envelope."""
+    import base64
+    res = res or {}
+    if not res.get("success"):
+        return _err(f"{label}: {res.get('error') or 'ExportThumbnails reported no success.'}")
+    out = {"success": True, "target": label,
+           "sheet": {k: res.get(k) for k in
+                     ("width", "height", "columns", "rows", "cellWidth", "cellHeight")}}
+    if out_type == "file":
+        out["path"] = p.get("file_path")
+        try:
+            out["bytes"] = os.path.getsize(p["file_path"])
+        except Exception:
+            out["bytes"] = None
+    else:
+        data = res.get("data") or ""
+        out["format"] = p.get("format", "jpg")
+        out["base64_length"] = len(data)
+        try:
+            raw = base64.b64decode(data)
+            ext = "png" if p.get("format", "jpg") == "png" else "jpg"
+            outdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
+            os.makedirs(outdir, exist_ok=True)
+            dest = os.path.join(outdir, f"sheet_{abs(hash(data)) % 10**10}.{ext}")
+            with open(dest, "wb") as fh:
+                fh.write(raw)
+            out["saved_to"] = dest
+            out["bytes"] = len(raw)
+        except Exception as exc:
+            out["save_error"] = str(exc)
+    return _ok(**out)
+
+
+@mcp.tool()
+def thumbnails(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Render several frames into ONE labelled grid image (Resolve 21.2+).
+
+    The upstream server has no coverage for the 21.2 ExportThumbnails API.
+    Resolve composites the frames you name into a single sheet, fills the grid
+    left-to-right/top-to-bottom in the order given, and labels each cell — so a
+    whole look across a clip reads back in one image instead of N stills. This
+    is the natural tool for camera-comparison and QC passes.
+
+    Actions (frames are 0-based offsets — from the item's start for item/media,
+    from the timeline start for timeline; album uses 1-based photo positions):
+      item(item_id?|name?, frames, track_type?, track_index?, …)
+      timeline(frames, …)
+      media(clip_id, frames, …)
+      album(album_id?|album_name?, frames, …)
+
+    frames  a list of ints, or of {frameOffset, label} dicts to caption cells
+            yourself (e.g. a timecode or clip name). Verified live on 21.2.0.6:
+            [0, 30, 60] -> a 3-row sheet; {frameOffset,label} dicts are honoured.
+    output_type  'file' (needs file_path, extension decides the format) or
+                 'encodedString' (default; base64 decoded to <server dir>/out/).
+    format       'jpg' (default) or 'png' — only for output_type 'encodedString'.
+    max_dimension  Caps the longer edge of the WHOLE sheet (not one cell), so
+                 more frames means smaller cells (default 0 = no scaling).
+    quality      JPEG quality 1-100 (default 100).
+
+    Returns {success, target, sheet:{width,height,columns,rows,cellWidth,
+    cellHeight}, path|saved_to, bytes}.
+    """
+    p = params or {}
+    ctx, err = _ctx()
+    if err:
+        return err
+    app, _, proj, tl = ctx
+
+    frames, ferr = _thumbnail_frames(p.get("frames"))
+    if ferr:
+        return _err(ferr)
+    opts, oerr = _thumb_options(p)
+    if oerr:
+        return _err(oerr)
+    out_type = opts["outputType"]
+
+    if action == "item":
+        if tl is None:
+            return _err("No current timeline.")
+        item, ierr = _find_item(tl, item_id=p.get("item_id"),
+                                track_type=p.get("track_type", "video"),
+                                track_index=int(p.get("track_index", 1)),
+                                name=p.get("name"))
+        if ierr:
+            return ierr
+        return _thumb_wrap(item.ExportThumbnails(frames, opts),
+                           f"item '{item.GetName()}'", p, out_type)
+
+    if action == "timeline":
+        if tl is None:
+            return _err("No current timeline.")
+        return _thumb_wrap(tl.ExportThumbnails(frames, opts),
+                           f"timeline '{tl.GetName()}'", p, out_type)
+
+    if action == "media":
+        cid = p.get("clip_id")
+        if not cid:
+            return _err("media needs clip_id.")
+        mp = proj.GetMediaPool()
+        found = _find_clip_recursive(mp.GetRootFolder(), cid)
+        if not found:
+            return _err(f"No media pool clip with id '{cid}'.")
+        return _thumb_wrap(found.ExportThumbnails(frames, opts),
+                           f"media '{found.GetName()}'", p, out_type)
+
+    if action == "album":
+        mp = proj.GetMediaPool()
+        alb, aerr = _resolve_album(proj, mp, album_id=p.get("album_id"),
+                                   name=p.get("album_name") or p.get("name"))
+        if aerr:
+            return aerr
+        return _thumb_wrap(alb.ExportThumbnails(frames, opts),
+                           f"album '{alb.GetName()}'", p, out_type)
+
+    return _err("Unknown action. Use item, timeline, media or album.")
+
+
+def _ensure_color_page(app):
+    """AutoColor and CDL only take effect on the Color page.
+
+    Measured on 21.2.0.6: the identical calls that return True on the Color
+    page return False and change nothing while Edit is showing. Returns the
+    page we switched away from, or None if we were already on Color.
+    """
+    try:
+        cur = app.GetCurrentPage()
+    except Exception:
+        cur = None
+    if cur == "color":
+        return None
+    try:
+        app.OpenPage("color")
+    except Exception:
+        pass
+    return cur
+
+
+@mcp.tool()
+def auto_color(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Automatic colour on a timeline clip (Resolve 21.2+).
+
+    Measured live on 21.2.0.6: ApplyAutoColor() applies a grade and flips the
+    auto-colour flag ON; GetAutoColorEnabled() reports it; ClearAutoColor()
+    removes the applied grade. SetAutoColorEnabled() only toggles a grade a
+    previous ApplyAutoColor() already made, so calling it FIRST legitimately
+    returns False — that is the documented behaviour, not a failure.
+
+    **The Color page must be showing.** On Edit the identical calls return
+    False and change nothing (measured). This tool switches to Color itself
+    and reports `page_switched_from` when it did.
+
+    Actions:
+      apply(item_id?|name?, track_type?, track_index?)
+        -> {success, applied, auto_color_enabled}
+      status(item_id?|name?, …) -> {success, auto_color_enabled}
+      enable | disable(item_id?|name?, …)
+        -> {success, changed, auto_color_enabled}
+      clear(item_id?|name?, …) -> {success, cleared}
+    """
+    p = params or {}
+    ctx, err = _ctx()
+    if err:
+        return err
+    app, _, proj, tl = ctx
+    if tl is None:
+        return _err("No current timeline.")
+    item, ierr = _find_item(tl, item_id=p.get("item_id"),
+                            track_type=p.get("track_type", "video"),
+                            track_index=int(p.get("track_index", 1)),
+                            name=p.get("name"))
+    if ierr:
+        return ierr
+    label = f"item '{item.GetName()}'"
+
+    switched_from = _ensure_color_page(app)
+    extra = {"page_switched_from": switched_from} if switched_from else {}
+
+    if action == "apply":
+        r = item.ApplyAutoColor()
+        return _ok(target=label, applied=bool(r),
+                   auto_color_enabled=item.GetAutoColorEnabled(), **extra)
+    if action == "status":
+        return _ok(target=label, auto_color_enabled=item.GetAutoColorEnabled(), **extra)
+    if action in ("enable", "disable"):
+        r = item.SetAutoColorEnabled(action == "enable")
+        return _ok(target=label, changed=bool(r),
+                   auto_color_enabled=item.GetAutoColorEnabled(), **extra)
+    if action == "clear":
+        return _ok(target=label, cleared=bool(item.ClearAutoColor()), **extra)
+    return _err("Unknown action. Use apply, status, enable, disable or clear.")
+
+
+@mcp.tool()
+def cdl(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Read or write the ASC CDL of a timeline clip's node (Resolve 21.2+).
+
+    GetCDL(node_index) returns the CDL equivalent of the node's primaries;
+    SetCDL applies one. Measured live on 21.2.0.6: a set/read round-trip
+    returns exactly the values written. GetCDL REQUIRES the node index —
+    calling it without one returns None (which reads like an empty result but
+    is just a missing argument).
+
+    Actions:
+      get(item_id?|name?, node_index?, track_type?, track_index?) -> {cdl}
+      set(item_id?|name?, node_index?, slope?, offset?, power?, saturation?,
+          track_type?, track_index?) -> {success, applied, cdl}
+
+    CDL values are space-separated RGB strings, e.g. slope="1.1 1.0 0.9" and
+    offset="0.0 0.0 0.0"; saturation is a float (1.0 = neutral).
+
+    **The Color page must be showing** — on Edit SetCDL returns False and the
+    grade is unchanged (measured on 21.2.0.6). This tool switches to Color
+    itself and reports `page_switched_from` when it did.
+    """
+    p = params or {}
+    ctx, err = _ctx()
+    if err:
+        return err
+    app, _, proj, tl = ctx
+    if tl is None:
+        return _err("No current timeline.")
+    item, ierr = _find_item(tl, item_id=p.get("item_id"),
+                            track_type=p.get("track_type", "video"),
+                            track_index=int(p.get("track_index", 1)),
+                            name=p.get("name"))
+    if ierr:
+        return ierr
+    label = f"item '{item.GetName()}'"
+    node_index = int(p.get("node_index", 1))
+    switched_from = _ensure_color_page(app)
+    extra = {"page_switched_from": switched_from} if switched_from else {}
+
+    if action == "get":
+        return _ok(target=label, node_index=node_index,
+                   cdl=item.GetCDL(node_index), **extra)
+    if action == "set":
+        spec: Dict[str, Any] = {"NodeIndex": node_index}
+        if p.get("slope") is not None:
+            spec["Slope"] = str(p["slope"])
+        if p.get("offset") is not None:
+            spec["Offset"] = str(p["offset"])
+        if p.get("power") is not None:
+            spec["Power"] = str(p["power"])
+        if p.get("saturation") is not None:
+            spec["Saturation"] = float(p["saturation"])
+        if len(spec) == 1:
+            return _err("set needs at least one of slope, offset, power, saturation.")
+        r = item.SetCDL(spec)
+        return _ok(target=label, node_index=node_index, applied=bool(r),
+                   cdl=item.GetCDL(node_index), **extra)
+    return _err("Unknown action. Use get or set.")
 
 
 if __name__ == "__main__":

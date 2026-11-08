@@ -1,20 +1,20 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.CaptRauti/resolve-ext",
-  "description": "Resolve MCP gaps: clip effects, Paste Attributes, frame export, photo albums, camera layouts.",
+  "description": "Resolve MCP gaps: clip effects, Paste Attributes, frame export, thumbnail grids, auto colour, CDL, photo albums, camera layouts.",
   "title": "ResolveMCP-ext",
   "websiteUrl": "https://github.com/CaptRauti/ResolveMCP-ext",
   "repository": {
     "url": "https://github.com/CaptRauti/ResolveMCP-ext",
     "source": "github"
   },
-  "version": "1.0.2",
+  "version": "1.0.3",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "resolve-ext",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

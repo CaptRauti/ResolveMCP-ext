@@ -2,9 +2,10 @@
 
 <!-- mcp-name: io.github.CaptRauti/resolve-ext -->
 
-An MCP server that adds the **DaVinci Resolve 21.1.2 scripting surfaces the
-mainstream Resolve MCP servers do not cover** — clip effects, effect
-properties, Paste-Attributes, frame export and media-pool folder lookups.
+An MCP server that adds the **DaVinci Resolve 21.1.2 and 21.2 scripting
+surfaces the mainstream Resolve MCP servers do not cover** — clip effects,
+effect properties, Paste-Attributes, frame export, thumbnail grids, automatic
+colour, ASC CDL and media-pool folder lookups.
 
 It is deliberately an **extension, not a replacement**: register it alongside
 the other two Resolve MCP servers and you get a larger surface with no overlap —
@@ -15,7 +16,10 @@ out to be broken are reported as broken rather than wrapped in a success.
 ```
 effects              apply/list/remove/toggle/reorder clip effects
 clip_attrs           copy attributes between clips (Paste Attributes)
-export_frame         stills from a clip or media-pool item
+export_frame         stills from a clip or media-pool item (+ 21.2 region-of-interest)
+thumbnails           render named frames as one labelled grid image (21.2)
+auto_color           automatic colour on a clip (21.2)
+cdl                  read/write a node's ASC CDL (21.2)
 folder_ops           which bin does this clip/folder live in
 photo_albums         albums, photos, ratings, flags, versions, stills
 node_graph           node labels, colours, enable state, LUTs, cache
@@ -35,7 +39,7 @@ third; the other two are not optional extras.
 |---|---|---|---|
 | **Blackmagic's own**<br>`ResolveMCP.exe` | **Ships with DaVinci Resolve 21** — nothing to download | 14 | A *meta-server*: it provides Resolve's scripting-API stubs and a Python sandbox (`run_script`, `search_scripting_api`, `get_whats_new`) plus LUT/DCTL management. It performs no Resolve actions itself. |
 | **community**<br>[`samuelgursky/davinci-resolve-mcp`](https://github.com/samuelgursky/davinci-resolve-mcp) | `npx` or git | 37<br>(390 with `--full`) | The workhorse: editing, media pool, render, markers, grading, Fusion — one granular tool per task. Ships a second `davinci-resolve-advanced` server (18 Node tools) for source-safe media analysis. |
-| **this project**<br>`resolve-ext` | pip | 10 | The gaps the other two leave — see the table below. |
+| **this project**<br>`resolve-ext` | pip | 13 | The gaps the other two leave — see the table below. |
 
 All three talk to the same Resolve through the same **single-client** scripting
 API. They coexist without overlap; registering one and wondering why a
@@ -232,15 +236,78 @@ other clip from that camera.
 ### `export_frame`
 
 ```
-item(item_id?|name?, frame_offset, output_type?, file_path?, format?, max_dimension?)
+item(item_id?|name?, frame_offset, output_type?, file_path?, format?, max_dimension?,
+     quality?, roi_x?, roi_y?, roi_width?, roi_height?)
 media(clip_id, frame_offset, output_type?, file_path?, format?, max_dimension?)
-timeline(frame_offset, ...)     # broken on 21.1.2 — see below
+timeline(frame_offset, ...)     # offset is RELATIVE to the timeline start
 ```
 
 `item` and `media` are verified working. The offset is 0-based and must be
 below the item's duration. `output_type`: `file` (needs `file_path`) or
 `encodedString` (default); for the latter the base64 is decoded and written to
 `out/` next to the server, with only a short prefix returned inline.
+
+**21.2 adds a normalised region of interest.** `roi_x`/`roi_y`/`roi_width`/
+`roi_height` are fractions of the frame (0..1, default the whole frame) and
+`quality` is JPEG 1-100. The fractions are per-axis, so equal width and height
+is *not* a square region on a non-square frame. Verified live on 21.2.0.6:
+`roi 0.25/0.25/0.5/0.5` with `max_dimension=512` returns a 512x288 still —
+a cropped frame without a render.
+
+### `thumbnails` (21.2)
+
+```
+item(item_id?|name?, frames, track_type?, track_index?, ...)
+timeline(frames, ...)
+media(clip_id, frames, ...)
+album(album_id?|album_name?, frames, ...)
+```
+
+Renders several named frames into **one labelled grid image** — the whole look
+across a clip reads back in a single sheet instead of N stills. Resolve fills
+the grid left-to-right/top-to-bottom in the order given and captions each cell.
+
+`frames` is a list of ints, or of `{frameOffset, label}` dicts to caption cells
+yourself (a timecode, a clip name). Offsets are 0-based — from the item's start
+for `item`/`media`, from the timeline start for `timeline`; `album` uses 1-based
+photo positions. `output_type` is `file` (needs `file_path`, **the extension is
+required** — without one Resolve answers `filePath must have a valid image file
+extension`) or `encodedString` (default, decoded to `out/`). `max_dimension`
+caps the longer edge of the *whole sheet*, so more frames means smaller cells.
+
+Returns `{success, target, sheet:{width,height,columns,rows,cellWidth,
+cellHeight}, path|saved_to, bytes}`. Verified live on 21.2.0.6 on all four
+targets.
+
+### `auto_color` (21.2)
+
+```
+apply(item_id?|name?, track_type?, track_index?)
+status(item_id?|name?, ...)
+enable | disable(item_id?|name?, ...)
+clear(item_id?|name?, ...)
+```
+
+Automatic colour on a timeline clip. `ApplyAutoColor` grades the clip and turns
+the auto-colour flag on; `clear` removes it; `enable`/`disable` toggle a grade a
+previous `apply` already made — so calling `enable` *first* legitimately returns
+`changed: false`. **The Color page must be showing** (on Edit the identical
+calls return `False` and change nothing — measured); the tool switches to Color
+itself and reports `page_switched_from` when it did.
+
+### `cdl` (21.2)
+
+```
+get(item_id?|name?, node_index?, track_type?, track_index?)
+set(item_id?|name?, node_index?, slope?, offset?, power?, saturation?, ...)
+```
+
+Reads or writes the ASC CDL of a clip's node. Values are space-separated RGB
+strings, e.g. `slope="1.1 1.0 0.9"`, `offset="0.0 0.0 0.0"`; `saturation` is a
+float (1.0 neutral). A set/read round-trip returns exactly the values written.
+`get` needs `node_index` — without it the API returns `None`, which reads like
+an empty result but is just a missing argument. **Color page required**, same as
+`auto_color`.
 
 ### `folder_ops`
 
