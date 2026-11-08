@@ -8,10 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-**DaVinci Resolve 21.2 coverage — the complete 21.2 scripting delta.** Three
-new tools plus new options and actions on three existing ones. Every claim
-below was verified on Resolve Studio 21.2.0.6 with a real call *and* a readback,
-not from the type stubs:
+**DaVinci Resolve 21.2 coverage — the complete 21.2 scripting delta — plus the
+two 21.1 surfaces no server covered.** Five new tools plus new options and
+actions on three existing ones. Every claim below was verified on Resolve
+Studio 21.2.0.6 with a real call *and* a readback, not from the type stubs:
 
 - **`thumbnails`** — `ExportThumbnails` on a timeline item, the timeline, a
   media-pool item or a photo album: renders the frames you name into one
@@ -39,6 +39,18 @@ not from the type stubs:
   (`Project.SetSetting('timelinePlaybackFrameRate')`, verified: set '25', read
   back '25') and the Extras Download Manager: `extras_list`, `extras_install`,
   `extras_uninstall`.
+- **`jobs`** (new tool) — the non-blocking job status getters 21.1 introduced:
+  `GetTranscribeAudioStatus`, `GetAnalyzeForSlateStatus`,
+  `GetSmartReframeStatus`, `GetDetectSceneCutsStatus`,
+  `GetCreateSubtitlesFromAudioStatus`, `GetRenderWithQuickExportStatus`, plus
+  `GetRenderJobStatus`. Neither server exposed any of them, so a queued
+  analysis could never be polled. Verified: all six answer on 21.2.0.6.
+- **`clone_media`** (new tool) — the MediaStorage Clone Tool:
+  `StartCloneMedia` / `StopCloneMedia` / `GetCloneStatus` /
+  `SetCloneToolSettings`. Zero coverage upstream. Verified end-to-end: a source
+  file was queued, copied, and a checksum manifest landed beside it.
+  **Windows gotcha:** Resolve rejects forward-slash paths here — it returns
+  `False` and copies nothing; the tool normalises them.
 
 The mainstream server (4.19.3) covers none of these — `ExportThumbnails`,
 `ApplyAutoColor`, the extras manager and the ROI options score zero hits in its

@@ -245,11 +245,11 @@ nesting is silently ignored by most clients and the tools never appear.
 ### Step 4 — Confirm the tools are visible
 
 After registering, the client must reload its MCP connections (in Hermes:
-`/reload-mcp`). Then confirm all ten tools are present:
+`/reload-mcp`). Then confirm all fifteen tools are present:
 
-`camera_comparison`, `clip_attrs`, `clip_position`, `effects`, `export_frame`,
-`folder_ops`, `node_graph`, `photo_albums`, `project_extras`,
-`resolve_ext_status`
+`camera_comparison`, `clip_attrs`, `clip_position`, `clone_media`, `cdl`,
+`effects`, `export_frame`, `folder_ops`, `jobs`, `node_graph`, `photo_albums`,
+`project_extras`, `resolve_ext_status`, `thumbnails`, `auto_color`
 
 If fewer appear, the registration is wrong — not the server. Re-run
 `resolve-ext doctor` first.

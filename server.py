@@ -3368,5 +3368,182 @@ def cdl(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return _err("Unknown action. Use get or set.")
 
 
+# --- 21.1 gaps neither other server covers ------------------------------
+#
+# Measured on Resolve Studio 21.2.0.6 (08.11.2026). These two surfaces are
+# absent from BOTH the mainstream server (0 grep hits) and this one until now:
+# the MediaStorage Clone Tool and the non-blocking job status getters that 21.1
+# introduced. The analysis APIs became asynchronous in 21.1 — the call starts
+# the job and you poll — but no server exposed the getters, so a caller had no
+# way to learn when a job had finished.
+
+
+@mcp.tool()
+def jobs(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Status of Resolve's asynchronous jobs (21.1+).
+
+    Since 21.1 the analysis APIs are non-blocking: the call queues the job and
+    you poll a status getter. Neither the upstream server nor this one exposed
+    those getters, so a caller could start a transcription or a scene-cut
+    analysis and never learn whether it finished. This closes that gap.
+
+    Every getter returns a dict with `JobStatus` and `CompletionPercentage`;
+    the analysis ones add `CurrentClipIndex` or `AnalysisSpeed`, and the
+    quick-export one adds `TimeTakenToRenderInMs`. A `null` entry means this
+    build does not answer that getter (they are 21.1+).
+
+    Actions:
+      async_status() -> {transcribe_audio, analyze_for_slate, smart_reframe,
+                         detect_scene_cuts, create_subtitles_from_audio,
+                         render_with_quick_export}
+      render_job(job_id) -> {job_id, status}
+    """
+    p = params or {}
+    ctx, err = _ctx()
+    if err:
+        return err
+    _app, _pm, proj, _tl = ctx
+
+    if action == "async_status":
+        getters = (
+            ("transcribe_audio", "GetTranscribeAudioStatus"),
+            ("analyze_for_slate", "GetAnalyzeForSlateStatus"),
+            ("smart_reframe", "GetSmartReframeStatus"),
+            ("detect_scene_cuts", "GetDetectSceneCutsStatus"),
+            ("create_subtitles_from_audio", "GetCreateSubtitlesFromAudioStatus"),
+            ("render_with_quick_export", "GetRenderWithQuickExportStatus"),
+        )
+        out = {}
+        for label, method in getters:
+            res, _w, e = _call_any([("Project", proj)], method)
+            out[label] = res if not e else None
+        return _ok(**out)
+
+    if action == "render_job":
+        jid = p.get("job_id")
+        if not jid:
+            return _err("render_job needs job_id (see the render tool's list_jobs).")
+        res, _w, e = _call_any([("Project", proj)], "GetRenderJobStatus", jid)
+        if e:
+            return _err(e)
+        return _ok(job_id=jid, status=res)
+
+    return _err("Unknown action. Use async_status or render_job.")
+
+
+_CLONE_CHECKSUM = {
+    "none": "CLONE_CHECKSUM_TYPE_NONE",
+    "filesize": "CLONE_CHECKSUM_TYPE_FILESIZE",
+    "crc32": "CLONE_CHECKSUM_TYPE_CRC32",
+    "md5": "CLONE_CHECKSUM_TYPE_MD5",
+    "sha256": "CLONE_CHECKSUM_TYPE_SHA256",
+    "sha512": "CLONE_CHECKSUM_TYPE_SHA512",
+    "xxh64": "CLONE_CHECKSUM_TYPE_XXH_64",
+}
+
+
+def _win_path(p):
+    """Normalise a path for StartCloneMedia.
+
+    Measured on 21.2.0.6 / Windows: forward slashes return False, backslashes
+    work. So callers can pass either form and the tool fixes it up.
+    """
+    if os.name != "nt" or not isinstance(p, str):
+        return p
+    return p.replace("/", "\\")
+
+
+@mcp.tool()
+def clone_media(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """MediaStorage Clone Tool — copy a directory tree of media (21.1+).
+
+    The upstream server has no coverage for StartCloneMedia / StopCloneMedia /
+    GetCloneStatus / SetCloneToolSettings, so a scripted media migration had no
+    route at all. The copy runs in the BACKGROUND: `start` returns as soon as
+    the job is queued, so poll `status` until `JobStatus` is `Complete`.
+
+    Actions:
+      status() -> {job_status, completion_percentage, error}
+        — GetCloneStatus. With no job ever started, JobStatus is `Complete`.
+      settings(preserve_folder_name?, checksum_type?) -> {settings, status}
+        — SetCloneToolSettings. There is no getter for these options, so this
+          reports what it just set (or `null` when called with no arguments).
+          checksum_type: none | filesize | crc32 | md5 | sha256 | sha512 |
+          xxh64 (mapped to resolve.CLONE_CHECKSUM_TYPE_*).
+      start(source_dir, target_dirs, preserve_folder_name?, checksum_type?)
+        -> {source, targets, queued, status}
+        — StartCloneMedia. target_dirs is one path or a list of paths. Pass
+          either slash style: on Windows Resolve rejects forward slashes with
+          `False` and copies nothing (measured), so the tool converts.
+          A checksum manifest (`filesizes.txt` etc.) lands next to the copy.
+      stop() -> {success, status}
+        — StopCloneMedia; returns False when no clone job is running.
+    """
+    p = params or {}
+    ctx, err = _ctx()
+    if err:
+        return err
+    app, _pm, _proj, _tl = ctx
+    ms = app.GetMediaStorage()
+
+    def _status():
+        st, _w, _e = _call_any([("MediaStorage", ms)], "GetCloneStatus")
+        return st
+
+    def _apply_settings():
+        spec = {}
+        if p.get("preserve_folder_name") is not None:
+            spec["PreserveFolderName"] = bool(p["preserve_folder_name"])
+        if p.get("checksum_type") is not None:
+            attr = _CLONE_CHECKSUM.get(str(p["checksum_type"]).lower())
+            if not attr:
+                return None, (f"unknown checksum_type {p['checksum_type']!r} — use "
+                              f"one of {', '.join(_CLONE_CHECKSUM)}.")
+            try:
+                spec["ChecksumType"] = getattr(app, attr)
+            except Exception as exc:
+                return None, f"resolve.{attr} is not available on this build ({exc})."
+        if not spec:
+            return None, None
+        ok, _w, e = _call_any([("MediaStorage", ms)], "SetCloneToolSettings", spec)
+        if e or ok is False:
+            return None, e or "SetCloneToolSettings returned False."
+        return spec, None
+
+    if action == "status":
+        return _ok(status=_status())
+
+    if action == "settings":
+        spec, serr = _apply_settings()
+        if serr:
+            return _err(serr)
+        return _ok(settings=spec, status=_status())
+
+    if action == "start":
+        src, tgt = p.get("source_dir"), p.get("target_dirs")
+        if not src or not tgt:
+            return _err("start needs source_dir and target_dirs (a path or a list of paths).")
+        _spec, serr = _apply_settings()
+        if serr:
+            return _err(serr)
+        # Windows: StartCloneMedia rejects forward slashes (measured — it
+        # returns False and copies nothing). Normalise before calling.
+        src = _win_path(src)
+        tgt = ([_win_path(t) for t in tgt] if isinstance(tgt, (list, tuple))
+               else _win_path(tgt))
+        ok, _w, e = _call_any([("MediaStorage", ms)], "StartCloneMedia", src, tgt)
+        if e or ok is False:
+            return _err(e or "StartCloneMedia returned False.")
+        return _ok(source=src, targets=tgt, queued=bool(ok), status=_status())
+
+    if action == "stop":
+        ok, _w, e = _call_any([("MediaStorage", ms)], "StopCloneMedia")
+        if e:
+            return _err(e)
+        return _ok(success=bool(ok), status=_status())
+
+    return _err("Unknown action. Use status, settings, start or stop.")
+
+
 if __name__ == "__main__":
     sys.exit(main())

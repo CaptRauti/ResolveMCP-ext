@@ -24,6 +24,8 @@ folder_ops           which bin does this clip/folder live in
 photo_albums         albums, photos, ratings, flags, versions, stills
 node_graph           node labels, colours, enable state, LUTs, cache
 project_extras       render presets, audio render formats, transcription
+jobs                 status of the non-blocking analysis/render jobs (21.1)
+clone_media          MediaStorage Clone Tool: copy a media tree (21.1)
 camera_comparison    2x2 / split layouts, camera labels, markers
 clip_position        read placement + handle offsets; flags broken APIs
 resolve_ext_status   health check
@@ -39,7 +41,7 @@ third; the other two are not optional extras.
 |---|---|---|---|
 | **Blackmagic's own**<br>`ResolveMCP.exe` | **Ships with DaVinci Resolve 21** — nothing to download | 14 | A *meta-server*: it provides Resolve's scripting-API stubs and a Python sandbox (`run_script`, `search_scripting_api`, `get_whats_new`) plus LUT/DCTL management. It performs no Resolve actions itself. |
 | **community**<br>[`samuelgursky/davinci-resolve-mcp`](https://github.com/samuelgursky/davinci-resolve-mcp) | `npx` or git | 37<br>(390 with `--full`) | The workhorse: editing, media pool, render, markers, grading, Fusion — one granular tool per task. Ships a second `davinci-resolve-advanced` server (18 Node tools) for source-safe media analysis. |
-| **this project**<br>`resolve-ext` | pip | 13 | The gaps the other two leave — see the table below. |
+| **this project**<br>`resolve-ext` | pip | 15 | The gaps the other two leave — see the table below. |
 
 All three talk to the same Resolve through the same **single-client** scripting
 API. They coexist without overlap; registering one and wondering why a
@@ -407,6 +409,44 @@ back `'25'`, while `timelineFrameRate` stays 24.0) and `extras_list` returns the
 running download) — they are not reads; poll `extras_list` for progress.
 Note: Resolve reports a negative `downloadSize` for some entries (e.g. AI Voice
 Training) — a quirk of its own data, passed through as-is.
+
+### `jobs` (21.1)
+
+```
+async_status()                            every job status getter in one call
+render_job(job_id)                        Project.GetRenderJobStatus
+```
+
+21.1 made the analysis APIs **non-blocking**: the call queues the job and you
+poll. Neither the upstream server nor this one exposed the getters, so a caller
+could start a transcription or a scene-cut analysis and never learn whether it
+finished. `async_status` reads all six — transcribe audio, analyze for slate,
+smart reframe, detect scene cuts, create subtitles from audio, render with quick
+export. Each returns `{JobStatus, CompletionPercentage, …}`; a `null` entry means
+this build does not answer that getter.
+
+### `clone_media` (21.1)
+
+```
+status()                                  GetCloneStatus
+settings(preserve_folder_name?, checksum_type?)   SetCloneToolSettings
+start(source_dir, target_dirs, …)         StartCloneMedia
+stop()                                    StopCloneMedia
+```
+
+The MediaStorage Clone Tool — copy a directory tree of media to one or more
+targets, with optional checksum verification (`none`, `filesize`, `crc32`,
+`md5`, `sha256`, `sha512`, `xxh64`). The upstream server has no coverage at all,
+so a scripted media migration had no route.
+
+The copy runs in the **background**: `start` returns as soon as the job is
+queued (`JobStatus: InProgress`), so poll `status` until `Complete`. Verified
+end-to-end on 21.2.0.6: a source file was queued, copied, and a checksum
+manifest landed beside it.
+
+**Windows path gotcha:** Resolve rejects **forward slashes** here — it returns
+`False` and copies nothing (measured: `C:/…` fails, `C:\…` works). The tool
+converts, so either style is fine to pass.
 
 ### `camera_comparison`
 
