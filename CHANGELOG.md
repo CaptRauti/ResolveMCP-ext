@@ -8,9 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-**DaVinci Resolve 21.2 coverage.** Three new tools, plus new options on an
-existing one. Every claim below was verified on Resolve Studio 21.2.0.6 with a
-real call *and* a readback, not from the type stubs:
+**DaVinci Resolve 21.2 coverage — the complete 21.2 scripting delta.** Three
+new tools plus new options and actions on three existing ones. Every claim
+below was verified on Resolve Studio 21.2.0.6 with a real call *and* a readback,
+not from the type stubs:
 
 - **`thumbnails`** — `ExportThumbnails` on a timeline item, the timeline, a
   media-pool item or a photo album: renders the frames you name into one
@@ -18,19 +19,32 @@ real call *and* a readback, not from the type stubs:
   geometry. `file_path` needs an image extension; frames may carry their own
   labels.
 - **`auto_color`** — `ApplyAutoColor` / `GetAutoColorEnabled` /
-  `SetAutoColorEnabled` / `ClearAutoColor`. The Color page must be showing — on
-  Edit the identical calls return `False` and change nothing — so the tool
-  switches to Color itself and reports `page_switched_from`.
-- **`cdl`** — `GetCDL` / `SetCDL` on a clip's node. A set/read round-trip
-  returns exactly the values written. `GetCDL` needs the node index. Color page
-  required, same as `auto_color`.
+  `SetAutoColorEnabled` / `ClearAutoColor`, on a timeline clip **and** on a
+  photo album item (`target="photo"`). The Color page must be showing — on Edit
+  the identical calls return `False` and change nothing — so the tool switches
+  to Color itself and reports `page_switched_from`.
+- **`cdl`** — `GetCDL` / `SetCDL`, likewise on a clip or a photo. A set/read
+  round-trip returns exactly the values written. `GetCDL` needs the node index.
+  **SetCDL needs all four keys** — a partial dict returns `False` and changes
+  nothing (measured: slope alone, slope+offset, slope+offset+power all failed) —
+  so the tool reads the current CDL and overlays what you passed. Color page
+  required.
 - **`export_frame`** — `roi_x`/`roi_y`/`roi_width`/`roi_height` (normalised,
   0..1) and `quality`. A region of interest renders a cropped still without a
   render pass: `roi 0.25/0.25/0.5/0.5` with `max_dimension=512` returns 512x288.
+- **`node_graph`** — `info` now reports each node's `enabled` flag via
+  `Graph.GetNodeEnabled` (21.2). On an older build the call fails and the key is
+  omitted rather than reported as a false `False`.
+- **`project_extras`** — `playback_frame_rate` / `set_playback_frame_rate`
+  (`Project.SetSetting('timelinePlaybackFrameRate')`, verified: set '25', read
+  back '25') and the Extras Download Manager: `extras_list`, `extras_install`,
+  `extras_uninstall`.
 
 The mainstream server (4.19.3) covers none of these — `ExportThumbnails`,
 `ApplyAutoColor`, the extras manager and the ROI options score zero hits in its
-source.
+source, and its `api_truth` table still records `timelinePlaybackFrameRate` as
+returning False for every value form and `Graph.SetNodeEnabled` as write-only
+with no `GetNodeEnabled`. Both are wrong for 21.2: measured working here.
 
 ### Fixed
 

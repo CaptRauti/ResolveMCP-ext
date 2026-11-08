@@ -1926,6 +1926,8 @@ def node_graph(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str
 
     Verified working on 21.1.2.10: GetNodeLabel, SetNodeLabel, GetNodeColor,
     SetNodeColor, SetNodeEnabled, GetNumNodes, ResetAllGrades, ResetAllNodeColors.
+    GetNodeEnabled — the read side — was added in 21.2 and is verified there;
+    on an older build the call fails and the `enabled` key is simply omitted.
     SetLUT/GetLUT returned False/None in testing (a LUT path is required and
     must exist) — the tool reports what it gets rather than assuming.
 
@@ -2050,6 +2052,11 @@ def node_graph(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str
             col, _e2 = _g("GetNodeColor", i)
             entry["label"] = lab
             entry["color"] = col
+            # Graph.GetNodeEnabled is new in 21.2. On an older build the call
+            # fails; omit the key rather than report a false `False`.
+            en, eerr = _g("GetNodeEnabled", i)
+            if not eerr:
+                entry["enabled"] = en
             out.append(entry)
         return out
 
@@ -2181,6 +2188,23 @@ def project_extras(action: str, params: Optional[Dict[str, Any]] = None) -> Dict
         — SetQuickExportEnabledForRenderPreset. Same limitation: False for
           factory presets on this build.
 
+    Playback frame rate (21.2):
+      playback_frame_rate() -> {timeline_playback_frame_rate, timeline_frame_rate}
+      set_playback_frame_rate(rate) -> {success, timeline_playback_frame_rate, ...}
+        — Project.SetSetting('timelinePlaybackFrameRate'), new in 21.2 and
+          verified there (set '25' -> read back '25'). The mainstream server
+          has this on record as returning False for every value form; that
+          measurement predates 21.2.
+
+    Extras Download Manager (21.2):
+      extras_list() -> {count, packages}
+        — resolve.GetExtrasPackages: the optional packages (mostly AI models)
+          with status, progress and size. Verified on 21.2.0.6 (6 packages).
+      extras_install(name) / extras_uninstall(name) -> {success, queued}
+        — queues the download or the removal, by the entry's `name`. This
+          DOWNLOADS from Blackmagic (or cancels a running download) — it is not
+          a read. Poll extras_list for status and progress.
+
     Audio render formats:
       audio_formats() -> {formats}
         — GetAudioRenderFormats: {display name -> file extension}.
@@ -2212,8 +2236,57 @@ def project_extras(action: str, params: Optional[Dict[str, Any]] = None) -> Dict
     ctx, err = _ctx()
     if err:
         return err
-    _, _, proj, _ = ctx
+    app, _, proj, _ = ctx
     mp = proj.GetMediaPool()
+
+    # --- 21.2: project playback frame rate --------------------------------
+    if action == "playback_frame_rate":
+        return _ok(
+            timeline_playback_frame_rate=proj.GetSetting("timelinePlaybackFrameRate"),
+            timeline_frame_rate=proj.GetSetting("timelineFrameRate"),
+        )
+
+    if action == "set_playback_frame_rate":
+        rate = p.get("rate")
+        if rate is None:
+            return _err("set_playback_frame_rate needs rate (e.g. '25' or 25).")
+        ok = proj.SetSetting("timelinePlaybackFrameRate", str(rate))
+        back = proj.GetSetting("timelinePlaybackFrameRate")
+        if not ok or str(back) != str(rate):
+            return _err(
+                f"SetSetting('timelinePlaybackFrameRate', {rate!r}) -> {ok!r}, "
+                f"read back {back!r}. This is a 21.2 addition; on an older "
+                "build it returns False and changes nothing."
+            )
+        return _ok(timeline_playback_frame_rate=back,
+                   timeline_frame_rate=proj.GetSetting("timelineFrameRate"))
+
+    # --- 21.2: Extras Download Manager ------------------------------------
+    if action == "extras_list":
+        pk, _w, err = _call_any([("Resolve", app)], "GetExtrasPackages")
+        if err:
+            return _err(err)
+        out = []
+        for it in (pk or []):
+            try:
+                out.append({k: it[k] for k in
+                            ("name", "description", "status", "progress",
+                             "downloadSize", "installedSize")})
+            except Exception:
+                out.append({"raw": str(it)})
+        return _ok(count=len(out), packages=out)
+
+    if action in ("extras_install", "extras_uninstall"):
+        name = p.get("name")
+        if not name:
+            return _err(f"{action} needs name (an entry's 'name' from extras_list).")
+        method = ("InstallExtrasPackage" if action == "extras_install"
+                  else "UninstallExtrasPackage")
+        res, _w, err = _call_any([("Resolve", app)], method, name)
+        if err:
+            return _err(err)
+        return _ok(package=name, action=action, queued=bool(res),
+                   note="Queued — poll extras_list for status and progress.")
 
     if action == "capabilities":
         def _has(obj, name):
@@ -3084,6 +3157,71 @@ def thumbnails(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str
     return _err("Unknown action. Use item, timeline, media or album.")
 
 
+def _find_photo(proj, mp, p):
+    """Resolve a PhotoAlbumItem by id or name, optionally within one album.
+
+    Photo album items live inside albums, so a name is only unique per album:
+    pass album_id/album_name to narrow it down, or photo_id for an exact hit.
+    Returns (item, error).
+    """
+    if p.get("album_id") or p.get("album_name"):
+        alb, err = _resolve_album(proj, mp, p.get("album_id"), p.get("album_name"))
+        if err:
+            return None, err
+        albums = [alb]
+    else:
+        albums = []
+        n, _w, _e = _call_any(_photo_objs(proj, mp), "GetPhotoAlbumCount")
+        for i in range(1, int(n or 0) + 1):
+            a, _w2, _e2 = _call_any(_photo_objs(proj, mp), "GetPhotoAlbumByIndex", i)
+            if a:
+                albums.append(a)
+
+    pid, pname = p.get("photo_id"), p.get("photo_name")
+    if not pid and not pname:
+        return None, ("Provide photo_id or photo_name (add album_id/album_name "
+                      "to narrow the search).")
+    hits = []
+    for a in albums:
+        for it in (a.GetPhotoList() or []):
+            try:
+                if (pid and it.GetUniqueId() == pid) or (pname and it.GetName() == pname):
+                    hits.append(it)
+            except Exception:
+                continue
+    if not hits:
+        return None, f"No photo matched (photo_id={pid!r}, photo_name={pname!r})."
+    if len(hits) > 1:
+        return None, (f"{len(hits)} photos matched — pass photo_id, or narrow "
+                      "with album_id/album_name.")
+    return hits[0], None
+
+
+def _grade_target(ctx, p):
+    """Resolve the object an AutoColor/CDL call acts on.
+
+    target='item' (default) is a timeline clip; target='photo' is a
+    PhotoAlbumItem — 21.2 added the same AutoColor and CDL methods to both.
+    Returns (obj, label, error).
+    """
+    _app, _, proj, tl = ctx
+    mp = proj.GetMediaPool()
+    if p.get("target", "item") == "photo":
+        obj, err = _find_photo(proj, mp, p)
+        if err:
+            return None, None, err
+        return obj, f"photo '{obj.GetName()}'", None
+    if tl is None:
+        return None, None, _err("No current timeline.")
+    obj, ierr = _find_item(tl, item_id=p.get("item_id"),
+                           track_type=p.get("track_type", "video"),
+                           track_index=int(p.get("track_index", 1)),
+                           name=p.get("name"))
+    if ierr:
+        return None, None, ierr
+    return obj, f"item '{obj.GetName()}'", None
+
+
 def _ensure_color_page(app):
     """AutoColor and CDL only take effect on the Color page.
 
@@ -3118,6 +3256,10 @@ def auto_color(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str
     False and change nothing (measured). This tool switches to Color itself
     and reports `page_switched_from` when it did.
 
+    target='item' (default) acts on a timeline clip; target='photo' acts on a
+    PhotoAlbumItem (21.2 added the same methods to both) — identify it with
+    photo_id, or photo_name plus album_id/album_name.
+
     Actions:
       apply(item_id?|name?, track_type?, track_index?)
         -> {success, applied, auto_color_enabled}
@@ -3131,31 +3273,25 @@ def auto_color(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str
     if err:
         return err
     app, _, proj, tl = ctx
-    if tl is None:
-        return _err("No current timeline.")
-    item, ierr = _find_item(tl, item_id=p.get("item_id"),
-                            track_type=p.get("track_type", "video"),
-                            track_index=int(p.get("track_index", 1)),
-                            name=p.get("name"))
-    if ierr:
-        return ierr
-    label = f"item '{item.GetName()}'"
+    obj, label, terr = _grade_target(ctx, p)
+    if terr:
+        return terr
 
     switched_from = _ensure_color_page(app)
     extra = {"page_switched_from": switched_from} if switched_from else {}
 
     if action == "apply":
-        r = item.ApplyAutoColor()
+        r = obj.ApplyAutoColor()
         return _ok(target=label, applied=bool(r),
-                   auto_color_enabled=item.GetAutoColorEnabled(), **extra)
+                   auto_color_enabled=obj.GetAutoColorEnabled(), **extra)
     if action == "status":
-        return _ok(target=label, auto_color_enabled=item.GetAutoColorEnabled(), **extra)
+        return _ok(target=label, auto_color_enabled=obj.GetAutoColorEnabled(), **extra)
     if action in ("enable", "disable"):
-        r = item.SetAutoColorEnabled(action == "enable")
+        r = obj.SetAutoColorEnabled(action == "enable")
         return _ok(target=label, changed=bool(r),
-                   auto_color_enabled=item.GetAutoColorEnabled(), **extra)
+                   auto_color_enabled=obj.GetAutoColorEnabled(), **extra)
     if action == "clear":
-        return _ok(target=label, cleared=bool(item.ClearAutoColor()), **extra)
+        return _ok(target=label, cleared=bool(obj.ClearAutoColor()), **extra)
     return _err("Unknown action. Use apply, status, enable, disable or clear.")
 
 
@@ -3169,6 +3305,10 @@ def cdl(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     calling it without one returns None (which reads like an empty result but
     is just a missing argument).
 
+    target='item' (default) acts on a timeline clip; target='photo' acts on a
+    PhotoAlbumItem (21.2 added GetCDL/SetCDL to both) — identify it with
+    photo_id, or photo_name plus album_id/album_name.
+
     Actions:
       get(item_id?|name?, node_index?, track_type?, track_index?) -> {cdl}
       set(item_id?|name?, node_index?, slope?, offset?, power?, saturation?,
@@ -3176,6 +3316,11 @@ def cdl(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
     CDL values are space-separated RGB strings, e.g. slope="1.1 1.0 0.9" and
     offset="0.0 0.0 0.0"; saturation is a float (1.0 = neutral).
+
+    You may pass any subset of slope/offset/power/saturation: the tool reads
+    the node's current CDL and overlays what you gave. That matters because
+    SetCDL itself needs ALL FOUR keys — a partial dict returns False and changes
+    nothing (measured on 21.2.0.6).
 
     **The Color page must be showing** — on Edit SetCDL returns False and the
     grade is unchanged (measured on 21.2.0.6). This tool switches to Color
@@ -3186,37 +3331,40 @@ def cdl(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if err:
         return err
     app, _, proj, tl = ctx
-    if tl is None:
-        return _err("No current timeline.")
-    item, ierr = _find_item(tl, item_id=p.get("item_id"),
-                            track_type=p.get("track_type", "video"),
-                            track_index=int(p.get("track_index", 1)),
-                            name=p.get("name"))
-    if ierr:
-        return ierr
-    label = f"item '{item.GetName()}'"
+    obj, label, terr = _grade_target(ctx, p)
+    if terr:
+        return terr
     node_index = int(p.get("node_index", 1))
     switched_from = _ensure_color_page(app)
     extra = {"page_switched_from": switched_from} if switched_from else {}
 
     if action == "get":
         return _ok(target=label, node_index=node_index,
-                   cdl=item.GetCDL(node_index), **extra)
+                   cdl=obj.GetCDL(node_index), **extra)
     if action == "set":
-        spec: Dict[str, Any] = {"NodeIndex": node_index}
-        if p.get("slope") is not None:
-            spec["Slope"] = str(p["slope"])
-        if p.get("offset") is not None:
-            spec["Offset"] = str(p["offset"])
-        if p.get("power") is not None:
-            spec["Power"] = str(p["power"])
-        if p.get("saturation") is not None:
-            spec["Saturation"] = float(p["saturation"])
-        if len(spec) == 1:
+        if all(p.get(k) is None for k in ("slope", "offset", "power", "saturation")):
             return _err("set needs at least one of slope, offset, power, saturation.")
-        r = item.SetCDL(spec)
+        # SetCDL needs ALL FOUR keys. A partial dict returns False and changes
+        # NOTHING — measured on 21.2.0.6: slope alone, slope+offset, and
+        # slope+offset+power each returned False with the grade unchanged; only
+        # the full set applied. So read the current CDL and overlay the
+        # caller's values instead of sending a partial dict.
+        cur = obj.GetCDL(node_index) or {}
+        spec: Dict[str, Any] = {
+            "NodeIndex": node_index,
+            "Slope": (str(p["slope"]) if p.get("slope") is not None
+                      else cur.get("Slope") or "1.0 1.0 1.0"),
+            "Offset": (str(p["offset"]) if p.get("offset") is not None
+                       else cur.get("Offset") or "0.0 0.0 0.0"),
+            "Power": (str(p["power"]) if p.get("power") is not None
+                      else cur.get("Power") or "1.0 1.0 1.0"),
+            "Saturation": (float(p["saturation"]) if p.get("saturation") is not None
+                           else cur.get("Saturation") if cur.get("Saturation") is not None
+                           else 1.0),
+        }
+        r = obj.SetCDL(spec)
         return _ok(target=label, node_index=node_index, applied=bool(r),
-                   cdl=item.GetCDL(node_index), **extra)
+                   cdl=obj.GetCDL(node_index), **extra)
     return _err("Unknown action. Use get or set.")
 
 

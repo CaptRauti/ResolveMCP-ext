@@ -295,6 +295,9 @@ previous `apply` already made — so calling `enable` *first* legitimately retur
 calls return `False` and change nothing — measured); the tool switches to Color
 itself and reports `page_switched_from` when it did.
 
+Works on a photo album item too: pass `target="photo"` with `photo_id`, or
+`photo_name` plus `album_id`/`album_name`. Verified on 21.2.0.6.
+
 ### `cdl` (21.2)
 
 ```
@@ -307,7 +310,13 @@ strings, e.g. `slope="1.1 1.0 0.9"`, `offset="0.0 0.0 0.0"`; `saturation` is a
 float (1.0 neutral). A set/read round-trip returns exactly the values written.
 `get` needs `node_index` — without it the API returns `None`, which reads like
 an empty result but is just a missing argument. **Color page required**, same as
-`auto_color`.
+`auto_color`. Works on a photo album item with `target="photo"`.
+
+**Pass any subset of the four values.** SetCDL itself needs *all four* keys: a
+partial dict returns `False` and changes nothing (measured on 21.2.0.6 — slope
+alone, slope+offset and slope+offset+power all failed; only the full set
+applied). The tool therefore reads the node's current CDL and overlays what you
+passed, so `slope` alone works and leaves offset/power/saturation as they were.
 
 ### `folder_ops`
 
@@ -348,7 +357,7 @@ action verifies by reading the album back and tells you so. Use
 ### `node_graph`
 
 ```
-info(item_id?|name?|photo_id?)        node list with labels and colours
+info(item_id?|name?|photo_id?)        node list with labels, colours, enabled
 label(node_index, label)              "" clears the label
 color(node_index, color)              "" clears the colour
 enable(node_index, enabled)
@@ -365,6 +374,10 @@ Blue, Purple, Violet, Pink, Tan, Beige, Brown, Chocolate.
 Target a timeline clip by `item_id`/`name`, or a photo by `photo_id`. Labels
 and colours verified persistent across calls.
 
+`info` also reports each node's `enabled` flag via `Graph.GetNodeEnabled`, new
+in 21.2 (verified there). On an older build that call fails and the key is
+omitted rather than reported as a false `False`.
+
 ### `project_extras`
 
 ```
@@ -376,11 +389,24 @@ audio_formats()                            {display name -> extension}
 audio_codecs(format_extension)             {description -> codec name}
 transcription(clip_id, use_nested?)        a clip's transcript
 set_transcription(clip_id, transcription)  verified by reading back
+playback_frame_rate()                      project playback vs timeline rate (21.2)
+set_playback_frame_rate(rate)              SetSetting, read back (21.2)
+extras_list()                              Extras Download Manager packages (21.2)
+extras_install(name) / extras_uninstall(name)  queues a download / removal (21.2)
 ```
 
 `audio_formats` / `audio_codecs` VERIFIED: 7 real formats
 (`FLAC, MP3, MP4, MXF OP-Atom, MXF OP1A (IMF), QuickTime, Wave`) and their
 codecs. `render_presets` VERIFIED: 37 real presets.
+
+The 21.2 additions: `playback_frame_rate` reads
+`timelinePlaybackFrameRate` (settable since 21.2 — verified: set `'25'`, read
+back `'25'`, while `timelineFrameRate` stays 24.0) and `extras_list` returns the
+6 AI packages Resolve offers on this machine with status/progress/size.
+`extras_install`/`extras_uninstall` **download from Blackmagic** (or cancel a
+running download) — they are not reads; poll `extras_list` for progress.
+Note: Resolve reports a negative `downloadSize` for some entries (e.g. AI Voice
+Training) — a quirk of its own data, passed through as-is.
 
 ### `camera_comparison`
 
