@@ -1,645 +1,649 @@
-# resolve-ext
-
-<!-- mcp-name: io.github.CaptRauti/resolve-ext -->
-
-An MCP server that adds the **DaVinci Resolve 21.1.2 and 21.2 scripting
-surfaces the mainstream Resolve MCP servers do not cover** — clip effects,
-effect properties, Paste-Attributes, frame export, thumbnail grids, automatic
-colour, ASC CDL and media-pool folder lookups.
-
-It is deliberately an **extension, not a replacement**: register it alongside
-the other three Resolve MCP servers and you get a larger surface with no overlap —
-see [the full setup](#the-full-resolve-mcp-setup--four-servers-all-of-them).
-Everything it exposes is measured against a live Resolve, and calls that turn
-out to be broken are reported as broken rather than wrapped in a success.
-
-```
-effects              apply/list/remove/toggle/reorder clip effects
-clip_attrs           copy attributes between clips (Paste Attributes)
-export_frame         stills from a clip or media-pool item (+ 21.2 region-of-interest)
-thumbnails           render named frames as one labelled grid image (21.2)
-auto_color           automatic colour on a clip (21.2)
-cdl                  read/write a node's ASC CDL (21.2)
-folder_ops           which bin does this clip/folder live in
-photo_albums         albums, photos, ratings, flags, versions, stills
-node_graph           node labels, colours, enable state, LUTs, cache
-project_extras       render presets, audio render formats, transcription
-jobs                 status of the non-blocking analysis/render jobs (21.1)
-clone_media          MediaStorage Clone Tool: copy a media tree (21.1)
-camera_comparison    2x2 / split layouts, camera labels, markers
-clip_position        move/trim clips, J-cut / L-cut (audio offset)
-resolve_ext_status   health check
-```
-
-## The full Resolve MCP setup — four servers, all of them
-
-Resolve is not covered by one MCP server. **Four independent servers do
-different jobs, and full coverage means running all four.** This project is one
-of them; the other three are not optional extras.
-
-| Server | Origin | Tools | What it is for |
-|---|---|---|---|
-| **Blackmagic's own**<br>`ResolveMCP.exe` | **Ships with DaVinci Resolve 21** — nothing to download | 14 | A *meta-server*: it provides Resolve's scripting-API stubs and a Python sandbox (`run_script`, `search_scripting_api`, `get_whats_new`) plus LUT/DCTL management. It performs no Resolve actions itself. |
-| **community**<br>[`samuelgursky/davinci-resolve-mcp`](https://github.com/samuelgursky/davinci-resolve-mcp) | `npx` or git | 36<br>(349 with `--full`) | The workhorse: editing, media pool, render, markers, grading, Fusion — related operations grouped behind action parameters. The `--full` variant is the same API surface, one tool per method; it costs context, not capability. |
-| **community, advanced**<br>[`davinci-resolve-advanced-mcp`](https://github.com/samuelgursky/davinci-resolve-mcp#advanced-server--beyond-the-scripting-api-optional-node) | same package, Node | 18 | **Beyond the scripting API.** Reads and edits Resolve *files* — `.drp` / `.drt` / `.drx` and the project's SQLite `Project.db` — **with no Resolve running**. Offline grade/QC catalog, conform/relink QC, whole-project node-graph relayout, provenance. Nothing else here can do this. |
-| **this project**<br>`resolve-ext` | pip | 15 | The gaps the other three leave — see the table below. |
-
-The first and third servers drive the same Resolve through the same
-**single-client** scripting API. The advanced server does not talk to Resolve at
-all — it works on the files — so it runs happily alongside them, or on a machine
-where Resolve is not installed.
-
-```bash
-# 1. Blackmagic's — already on disk, just register it:
-#    %ProgramFiles%\Blackmagic Design\DaVinci Resolve\ResolveMCP.exe   (Windows)
-#    /Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Applications/ResolveMCP
-#    /opt/resolve/bin/ResolveMCP                                       (Linux)
-
-# 2. the community server (use --clients manual when driving it non-interactively):
-npx davinci-resolve-mcp setup
-
-# 3. its advanced sibling — offline file access, needs Node and nothing else.
-#    The optional deps are what unlock project_read / conform.verify / pipeline:
-npm install --prefix <checkout>/resolve-advanced --include=optional
-#    then register:  node <checkout>/bin/davinci-resolve-advanced-mcp.mjs
-
-# 4. this project:
-pip install https://github.com/CaptRauti/ResolveMCP-ext/releases/download/v1.0.4/resolve_ext-1.0.4-py3-none-any.whl
-resolve-ext doctor
-```
-
-Full procedure, per-platform paths, the Windows "Resolve is on another drive"
-case, and the failure modes of each: **[AGENTS.md](AGENTS.md)** — written so an
-AI agent can install all four unattended.
-
-## Why this exists
-
-DaVinci Resolve **21.1.2** (22 Oct 2026) added a batch of scripting APIs. The
-popular MCP servers do not implement them — verified two ways: searching their
-source for each symbol, and probing live Resolve objects with `hasattr` (a type
-stub documents the API; only the live object proves your build has it).
-
-| Resolve 21.1.2 symbol | In mainstream MCP servers |
-|---|---|
-| `Resolve.GetEffectsList` | absent |
-| `TimelineItem.AddEffect` / `GetEffects` / `DeleteEffects` | absent |
-| `Effect.GetInfo` / `Get/SetIsEnabled` / `Get/SetIndex` | absent |
-| `TimelineItem.CopyAttributes` | absent |
-| `TimelineItem.ExportFrame` / `MediaPoolItem.ExportFrame` | absent |
-| `MediaPoolItem.GetParentFolder` / `Folder.GetParentFolder` | absent |
-| `TimelineItem.Get/SetLeftOffset` / `GetPosition` | absent |
-| `Timeline.MoveItems` / `DeleteGaps` / `Get/SetIsEnabled` | absent |
-| **Photo Album APIs** (`PhotoAlbum`, `PhotoAlbumItem`, 53 methods) | absent |
-| `Graph.SetNodeLabel` / `Get/SetNodeColor` / `SetNodeEnabled` | absent |
-| `Project.GetAudioRenderFormats` / `GetAudioRenderCodecs` | absent |
-| `Project.UpdateRenderPreset` / `SetQuickExportEnabledForRenderPreset` | absent |
-| `MediaPoolItem.SetTranscription` | absent |
-
-`TimelineItem` alone exposes **113 methods** on 21.1.2; a large share of them
-were unreachable through MCP before this server.
-
-## Install
-
-> **Installing this with an AI agent?** Point it at
-> [AGENTS.md](AGENTS.md) — it is a step-by-step procedure written for agents,
-> including the failure cases. This section is the human-facing version.
-
-Requires **Python 3.10+** and **DaVinci Resolve Studio** (external scripting is
-a Studio feature — the free build refuses it).
-
-### From a release (recommended)
-
-Download the wheel from the [releases page][releases] and install it:
-
-```bash
-pip install resolve_ext-1.0.4-py3-none-any.whl
-```
-
-The wheel is pure Python and platform-independent — the same file works on
-Windows, macOS and Linux.
-
-### From a git checkout
-
-```bash
-pip install git+https://github.com/CaptRauti/ResolveMCP-ext
-```
-
-Or from a local clone:
-
-```bash
-git clone https://github.com/CaptRauti/ResolveMCP-ext
-cd ResolveMCP-ext
-pip install .
-```
-
-`mcp` 2.x breaks FastMCP, so the dependency is pinned `<2`. That pin is in the
-package metadata — you do not need to add it yourself.
-
-### Verify the installation
-
-```bash
-resolve-ext doctor
-```
-
-```
-resolve-ext 1.0.0
-
---- Python ---
-  3.12.4 at /usr/bin/python3
-  ok (3.10+)
-
---- DaVinci Resolve scripting API ---
-platform      linux
-api_path      /opt/resolve/Developer/Scripting  (found)
-lib_path      /opt/resolve/libs/fusionscript.so  (found)
-
---- Import test ---
-  ok: DaVinciResolveScript imports
-
---- Live connection ---
-  ok: connected to Resolve; project = My Project
-
---- Result ---
-  All checks passed.
-```
-
-`doctor` exits `0` when everything works and `1` otherwise, so it is usable in
-a setup script. When something is wrong it names the exact path that is missing
-and what to enable.
-
-### Register with your MCP client
-
-The server finds Resolve's scripting API by itself, so on a default
-installation there is **nothing to configure**:
-
-```json
-{
-  "mcpServers": {
-    "resolve-ext": { "command": "resolve-ext" }
-  }
-}
-```
-
-For a non-standard Resolve location, or to see the explicit form, run:
-
-```bash
-resolve-ext env
-```
-
-which prints the configuration for the machine it runs on — including the exact
-`RESOLVE_SCRIPT_API`, `RESOLVE_SCRIPT_LIB` and `PYTHONPATH` values — as generic
-JSON and as a `hermes mcp add` command.
-
-When merging into an existing client config, the server entry sits **flat**
-under the client's own `mcpServers` key. Do not wrap it in a second
-`mcpServers` level — that silently disables tool discovery.
-
-### Resolve settings
-
-Resolve must be running with **Preferences → System → General → External
-scripting using → Local**.
-
-[releases]: https://github.com/CaptRauti/ResolveMCP-ext/releases
-
-## Tools
-
-### `effects`
-
-```
-list_available(media_type?)          video (default) | photo | audio
-list_applied(item_id?|name?, category?)
-apply(item_id?|name?, category, id)
-remove(item_id?|name?, category, indices?)
-set_enabled(item_id?|name?, index, enabled, category?)
-reorder(item_id?|name?, index, new_index, category?)
-```
-
-Address a timeline item with `item_id` (`GetUniqueId`) or with `name` plus the
-track it sits on (`track_type` default `video`, `track_index` default `1`).
-
-Always call `list_available` first — `apply` needs the `category` and `id` it
-returns. On a stock 21.1.2 Studio that is **36 fusion + 98 ofx** effects for
-`video`, plus the Fairlight set for `audio`. Fusion ids look like
-`Fusion/Effects/<category>/<name>`.
-
-### `clip_attrs`
-
-```
-options()                                    the full option vocabulary
-copy(source_id?|source_name?, target_ids?|target_names?, options, ...)
-read(item_id?|name?)
-```
-
-The API behind the Edit page's **Paste Attributes** — the lever that makes a
-per-camera look repeatable: grade one clip, push the same attributes onto every
-other clip from that camera.
-
-36 options in 6 groups (`clip`, `video`, `zoom_crop_flip`, `retime`,
-`grade_fusion`, `audio`). Shorthands: `copy_all_video`, `copy_all_audio`.
-
-```json
-{"colorCorrection": true, "allZoomAttributes": true,
- "allCropAttributes": true, "videoPlugins": true}
-```
-
-### `export_frame`
-
-```
-item(item_id?|name?, frame_offset, output_type?, file_path?, format?, max_dimension?,
-     quality?, roi_x?, roi_y?, roi_width?, roi_height?)
-media(clip_id, frame_offset, output_type?, file_path?, format?, max_dimension?)
-timeline(frame_offset, ...)     # offset is RELATIVE to the timeline start
-```
-
-`item` and `media` are verified working. The offset is 0-based and must be
-below the item's duration. `output_type`: `file` (needs `file_path`) or
-`encodedString` (default); for the latter the base64 is decoded and written to
-`out/` next to the server, with only a short prefix returned inline.
-
-**21.2 adds a normalised region of interest.** `roi_x`/`roi_y`/`roi_width`/
-`roi_height` are fractions of the frame (0..1, default the whole frame) and
-`quality` is JPEG 1-100. The fractions are per-axis, so equal width and height
-is *not* a square region on a non-square frame. Verified live on 21.2.0.6:
-`roi 0.25/0.25/0.5/0.5` with `max_dimension=512` returns a 512x288 still —
-a cropped frame without a render.
-
-### `thumbnails` (21.2)
-
-```
-item(item_id?|name?, frames, track_type?, track_index?, ...)
-timeline(frames, ...)
-media(clip_id, frames, ...)
-album(album_id?|album_name?, frames, ...)
-```
-
-Renders several named frames into **one labelled grid image** — the whole look
-across a clip reads back in a single sheet instead of N stills. Resolve fills
-the grid left-to-right/top-to-bottom in the order given and captions each cell.
-
-`frames` is a list of ints, or of `{frameOffset, label}` dicts to caption cells
-yourself (a timecode, a clip name). Offsets are 0-based — from the item's start
-for `item`/`media`, from the timeline start for `timeline`; `album` uses 1-based
-photo positions. `output_type` is `file` (needs `file_path`, **the extension is
-required** — without one Resolve answers `filePath must have a valid image file
-extension`) or `encodedString` (default, decoded to `out/`). `max_dimension`
-caps the longer edge of the *whole sheet*, so more frames means smaller cells.
-
-Returns `{success, target, sheet:{width,height,columns,rows,cellWidth,
-cellHeight}, path|saved_to, bytes}`. Verified live on 21.2.0.6 on all four
-targets.
-
-### `auto_color` (21.2)
-
-```
-apply(item_id?|name?, track_type?, track_index?)
-status(item_id?|name?, ...)
-enable | disable(item_id?|name?, ...)
-clear(item_id?|name?, ...)
-```
-
-Automatic colour on a timeline clip. `ApplyAutoColor` grades the clip and turns
-the auto-colour flag on; `clear` removes it; `enable`/`disable` toggle a grade a
-previous `apply` already made — so calling `enable` *first* legitimately returns
-`changed: false`. **The Color page must be showing** (on Edit the identical
-calls return `False` and change nothing — measured); the tool switches to Color
-itself and reports `page_switched_from` when it did.
-
-Works on a photo album item too: pass `target="photo"` with `photo_id`, or
-`photo_name` plus `album_id`/`album_name`. Verified on 21.2.0.6.
-
-### `cdl` (21.2)
-
-```
-get(item_id?|name?, node_index?, track_type?, track_index?)
-set(item_id?|name?, node_index?, slope?, offset?, power?, saturation?, ...)
-```
-
-Reads or writes the ASC CDL of a clip's node. Values are space-separated RGB
-strings, e.g. `slope="1.1 1.0 0.9"`, `offset="0.0 0.0 0.0"`; `saturation` is a
-float (1.0 neutral). A set/read round-trip returns exactly the values written.
-`get` needs `node_index` — without it the API returns `None`, which reads like
-an empty result but is just a missing argument. **Color page required**, same as
-`auto_color`. Works on a photo album item with `target="photo"`.
-
-**Pass any subset of the four values.** SetCDL itself needs *all four* keys: a
-partial dict returns `False` and changes nothing (measured on 21.2.0.6 — slope
-alone, slope+offset and slope+offset+power all failed; only the full set
-applied). The tool therefore reads the node's current CDL and overlays what you
-passed, so `slope` alone works and leaves offset/power/saturation as they were.
-
-### `folder_ops`
-
-```
-parent_of_clip(clip_id)              which bin holds this clip
-parent_of_folder(path?|folder_id?)   a folder's parent (root has none)
-path(clip_id?|folder_id?)            "Master/Sub/Bin"
-find_clip(clip_id)                   locate a clip anywhere in the tree
-```
-
-### `photo_albums`
-
-```
-list() / current() / set_current(album_id?|name?)
-create(name) / create_from_photos(name, clip_ids) / delete(album_ids?) / rename(...)
-quick_export_presets() / render_settings(settings?)
-photos(album_id?|name?) / add_photos(clip_ids) / remove_photos(photo_ids) / current_item()
-stills(album_id?|name?, all_photos?)
-photo(photo_id) / rate(photo_id, stars) / flag(photo_id, color?|clear?)
-clip_color(photo_id, color?|clear?) / versions(photo_id)
-add_version / load_version / delete_version
-copy_grade / effects_list / effect_apply / effect_remove / fusion_comps / fusion_add
-```
-
-Verified working on 21.1.2.10: **9/9 `PhotoAlbum` methods, 20/20
-`PhotoAlbumItem` methods**, `CreatePhotoAlbumFromPhotos`, persistent ratings /
-flags / versions, `AddFusionComp` on a photo.
-
-`add_photos` is **broken upstream** (`AddToPhotoAlbum` adds nothing) — the
-action verifies by reading the album back and tells you so. Use
-**`create_from_photos`**, which is the verified path.
-
-> Note the split: the album *listing* methods live on `Project`, the
-> *creating/adding* ones on `MediaPool`, and Resolve answers none of them. The
-> tool resolves the right object per call, because a Resolve proxy makes
-> `hasattr` report every method on every object.
-
-### `node_graph`
-
-```
-info(item_id?|name?|photo_id?)        node list with labels, colours, enabled
-label(node_index, label)              "" clears the label
-color(node_index, color)              "" clears the colour
-enable(node_index, enabled)
-tools(node_index)                     which Fusion/OFX tools sit in the node
-lut(node_index, lut_path?)            read, or set
-cache(node_index, mode?)              read, or set
-reset_colors()                        photo graphs only
-reset_grades(confirm=true)            destructive — clears the whole grade
-```
-
-Valid node colours: Orange, Apricot, Yellow, Lime, Olive, Green, Teal, Navy,
-Blue, Purple, Violet, Pink, Tan, Beige, Brown, Chocolate.
-
-Target a timeline clip by `item_id`/`name`, or a photo by `photo_id`. Labels
-and colours verified persistent across calls.
-
-`info` also reports each node's `enabled` flag via `Graph.GetNodeEnabled`, new
-in 21.2 (verified there). On an older build that call fails and the key is
-omitted rather than reported as a false `False`.
-
-### `project_extras`
-
-```
-capabilities()                             what this build answers at all
-render_presets()                           GetRenderPresetList
-update_render_preset(preset_name)          GUI-dependent, see the broken table
-quick_export_enable(preset_name, enabled)  GUI-dependent
-audio_formats()                            {display name -> extension}
-audio_codecs(format_extension)             {description -> codec name}
-transcription(clip_id, use_nested?)        a clip's transcript
-set_transcription(clip_id, transcription)  verified by reading back
-playback_frame_rate()                      project playback vs timeline rate (21.2)
-set_playback_frame_rate(rate)              SetSetting, read back (21.2)
-extras_list()                              Extras Download Manager packages (21.2)
-extras_install(name) / extras_uninstall(name)  queues a download / removal (21.2)
-```
-
-`audio_formats` / `audio_codecs` VERIFIED: 7 real formats
-(`FLAC, MP3, MP4, MXF OP-Atom, MXF OP1A (IMF), QuickTime, Wave`) and their
-codecs. `render_presets` VERIFIED: 37 real presets.
-
-The 21.2 additions: `playback_frame_rate` reads
-`timelinePlaybackFrameRate` (settable since 21.2 — verified: set `'25'`, read
-back `'25'`, while `timelineFrameRate` stays 24.0) and `extras_list` returns the
-6 AI packages Resolve offers on this machine with status/progress/size.
-`extras_install`/`extras_uninstall` **download from Blackmagic** (or cancel a
-running download) — they are not reads; poll `extras_list` for progress.
-Note: Resolve reports a negative `downloadSize` for some entries (e.g. AI Voice
-Training) — a quirk of its own data, passed through as-is.
-
-### `jobs` (21.1)
-
-```
-async_status()                            every job status getter in one call
-render_job(job_id)                        Project.GetRenderJobStatus
-```
-
-21.1 made the analysis APIs **non-blocking**: the call queues the job and you
-poll. Neither the upstream server nor this one exposed the getters, so a caller
-could start a transcription or a scene-cut analysis and never learn whether it
-finished. `async_status` reads all six — transcribe audio, analyze for slate,
-smart reframe, detect scene cuts, create subtitles from audio, render with quick
-export. Each returns `{JobStatus, CompletionPercentage, …}`; a `null` entry means
-this build does not answer that getter.
-
-### `clone_media` (21.1)
-
-```
-status()                                  GetCloneStatus
-settings(preserve_folder_name?, checksum_type?)   SetCloneToolSettings
-start(source_dir, target_dirs, …)         StartCloneMedia
-stop()                                    StopCloneMedia
-```
-
-The MediaStorage Clone Tool — copy a directory tree of media to one or more
-targets, with optional checksum verification (`none`, `filesize`, `crc32`,
-`md5`, `sha256`, `sha512`, `xxh64`). The upstream server has no coverage at all,
-so a scripted media migration had no route.
-
-The copy runs in the **background**: `start` returns as soon as the job is
-queued (`JobStatus: InProgress`), so poll `status` until `Complete`. Verified
-end-to-end on 21.2.0.6: a source file was queued, copied, and a checksum
-manifest landed beside it.
-
-**Windows path gotcha:** Resolve rejects **forward slashes** here — it returns
-`False` and copies nothing (measured: `C:/…` fails, `C:\…` works). The tool
-converts, so either style is fine to pass.
-
-### `camera_comparison`
-
-```
-detect()                 which camera each clip is (from its name)
-grid_2x2()               four cameras in quadrants, scale 0.5
-split_h() / split_v()    two-up, side by side or stacked
-layout(assignments)      explicit {clip_id: {x, y, scale}} — fractions of raster
-fullframe(clip_ids)      back to 1.0 zoom, centred
-markers()                timeline markers naming each camera
-sort_to_bins()           file clips into per-camera bins by name
-build_timeline()         one video track per camera, scenes synced
-read()                   current transform of every clip
-```
-
-Camera detection, longest prefix first:
-
-| prefix | camera | marker |
-|---|---|---|
-| `ace*` | Insta360 AcePro | Orange |
-| `go*` | Insta360 Go Ultra | Green |
-| `luna*` | Insta360 Luna Ultra | Cyan |
-| `x*` | Insta360 X5 | Blue |
-| `vid_*` | Handy (Android file) | Gray |
-
-**Why this tool exists:** the loose scripts this replaces positioned clips
-with `SetProperty("PositionX", …)` / `"PositionY"`. MEASURED on 21.1.2.10 those
-keys return **`False` and are silently ignored** — `GetProperty` gives back
-`False` too. Zoom worked, the positioning never did. The real keys are **`Pan`**
-(x, +right) and **`Tilt`** (y, **+up**), in pixels. Every write here is read
-back, and a transform that does not stick is reported as a failure.
-
-Verified: on a 3840x2160 timeline `grid_2x2` puts AcePro at `Pan -960, Tilt
-540` (top-left) and Go Ultra at `Pan 960, Tilt 540` (top-right), read back.
-
-### `clip_position`
-
-```
-get(item_id?|name?)                                 position + handle offsets (read-only)
-set(start_frame?|new_track_index?, move_linked?)    move the clip
-move(items=[…], move_linked?)                       move several in one call
-set_offset(left?|right?, update_linked_items?)      head/tail trim, with readback
-j_l_cut(offset_frames, …)                           J-cut / L-cut: shift only the audio
-delete_gaps()                                       close the gaps between clips
-enabled()                                           timeline enabled state
-```
-
-`set_offset` sets the **trim** at an edit point: `left=n` makes the clip begin
-`n` frames into its source. Measured on a clip at 86400 with source range 0–71:
-`left=5` gave start 86405 / source_start 5 / duration 67, and `left=0` restored
-it exactly — it is fully reversible. A negative value extends into the head
-handle and returns `False` when no handle is left.
-
-`j_l_cut` is the J-cut / L-cut primitive, and the reason this tool grew.
-`offset_frames` negative starts the audio earlier than its picture (J-cut — the
-next sound leads the image); positive starts it later (L-cut — the sound
-outlasts the image). It uses `Timeline.MoveItems(..., moveLinkedItems=False)`, so
-the picture does not move and the pair stays linked with the offset intact.
-Measured: an L-cut of +24 moved the audio 86400 → 86424; a real J-cut of −12 on
-a clip with a predecessor moved its audio 86496 → 86484, and Resolve trimmed the
-predecessor's audio tail to make room — exactly what a J-cut does in the NLE.
-
-Two traps it wraps up for you: a clip appended with `mediaType=1` lands as
-**video only**, so there is no audio to offset (append without `mediaType`); and
-a J-cut needs a **predecessor** — Resolve refuses to place audio before the
-timeline's `StartFrame`, and the tool says so rather than reporting a bare
-failure.
-
-## Measured behaviour on Resolve 21.2.0.6
-
-Everything below was measured against a live Studio build, not read from docs.
-`tests/` reproduces it — 132 assertions across four suites, 0 failures.
-
-**Re-measured on 21.2.0.6 and WITHDRAWN:** `TimelineItem.SetPosition`,
-`Timeline.MoveItems` and `TimelineItem.SetLeftOffset` were recorded here as
-broken or destructive on 21.1.2.10. All three work, and `SetLeftOffset` is
-reversible. The destructive reading came from a timeline whose
-`StartFrame == EndFrame` (duration 0) while still holding clips — the
-`AppendToTimeline` entry below is the real root cause. Reported upstream as
-issue #336.
-
-**Working**
-
-| Call | Result |
-|---|---|
-| `Resolve.GetEffectsList` | 36 fusion + 98 ofx (video), Fairlight (audio) |
-| `TimelineItem.AddEffect` / `GetEffects` / `DeleteEffects` | verified end to end |
-| `Effect.GetInfo` / `GetIsEnabled` / `SetIsEnabled` / `GetIndex` | verified |
-| `TimelineItem.CopyAttributes` | verified with changed source values |
-| `TimelineItem.ExportFrame` | offsets `0..duration-1` succeed, beyond is refused |
-| `MediaPoolItem.ExportFrame` | verified, file written |
-| `MediaPoolItem` / `Folder.GetParentFolder` | verified |
-| `Timeline.GetIsEnabled` / `SetIsEnabled` | verified |
-
-**Broken or destructive — do not use**
-
-| Call | Measured behaviour |
-|---|---|
-| `TimelineItem.SetPosition` | **Works** on 21.2.0.6 — a clip at 86400 moved to 86800, confirmed by both `GetPosition` and `GetStart`; `Timeline.MoveItems` likewise (→ 87000). An earlier release recorded both as returning `False` for **every** input; that measurement ran on a timeline reporting `StartFrame == EndFrame` — see the `AppendToTimeline` entry. |
-| `Timeline.ExportFrame` | **Works** — `frameOffset` is relative to the timeline start, valid `0..duration-1`. Verified on a 480-frame timeline: 0..479 succeed, 480 is refused. An absolute frame is always refused, which reads like a failure. An earlier release listed this as broken; that was a bad measurement on a timeline whose metadata contradicted its contents. |
-| `Timeline.DeleteGaps` | **Works** — verified `[86400, 86600, 86800]` → `[86400, 86520, 86640]`, gaps closed. It does nothing on a timeline that reports `StartFrame == EndFrame` while holding clips; see the `AppendToTimeline` entry below. |
-| `TimelineItem.SetLeftOffset` | **Works, and is reversible** on 21.2.0.6 — it sets the HEAD trim: `left=5` on a clip at 86400 with source range 0–71 gave start 86405 / source_start 5 / duration 67, and `left=0` restored it exactly. A negative value extends into the head handle and returns `False` when no handle is left. The earlier "moved to −85995, not restorable" reading came from the same duration-0 timeline as the `SetPosition` entry. |
-| `MediaPool.AddToPhotoAlbum` | Adds nothing and returns an empty list. Tested four ways: immediately after `CreateEmptyPhotoAlbum`, with a 2 s pause, after an explicit `SetCurrentPhotoAlbum` that `GetCurrentPhotoAlbum` confirmed, and with a fresh album each time — zero photos every run. `MediaPool.CreatePhotoAlbumFromPhotos` VERIFIED working (photos land and read back), so use that. |
-| `Graph.ResetAllNodeColors` | Exists on a photo album item's graph but **not** on a timeline clip's graph (`NoneType is not callable`). Clearing a colour with `SetNodeColor(i, "")` works on both. |
-| `MediaPoolItem.GetNodeGraph` | Not callable on 21.1.2.10 (while `TimelineItem.GetNodeGraph` and `PhotoAlbumItem.GetNodeGraph` both work). Put the clip on a timeline and address it by `item_id`. |
-| `Project.UpdateRenderPreset` | Returns `False` for all 37 factory presets that `GetRenderPresetList` reports (`'H.264 Master'` included). `Project.SaveRenderPreset` does not exist in the API, so a user preset cannot be created from scripting to test against. GUI-dependent at best. |
-| `Project.SetQuickExportEnabledForRenderPreset` | Same shape: `False` for a factory preset. |
-| `MediaPoolItem.SetTranscription` | Returns `False` for a PNG still **and** for a real video clip with no transcript, with both `'01:00:00:00'` and `'00:00:00:00'` start timecodes. It *replaces* a transcript, so it appears unable to create one where none exists. |
-| `MediaPoolItem.SetClipColor` (photo items) | Returned `False` for `'Sky'` on a photo album item while the colour list is documented; `ClearClipColor` works. The action reports the rejection rather than assuming success. |
-| `Folder.AddSubFolder` / `Folder.MoveClips` | Do not exist. Both live on **MediaPool** (`mp.AddSubFolder(parent, name)`, `mp.MoveClips(clips, folder)`) — verified that `MoveClips` really relocates the clip and returns `True`, not a false success. Same object-split as the photo-album API. |
-| `TimelineItem.SetProperty("PositionX"/"PositionY")` | **Silently ignored** — both the setter and the getter return `False`. Use `Pan` / `Tilt` (pixels, +x right, +y up). This is what broke the project's own grid scripts: zoom applied, positions never did. |
-| `TimelineItem.AddMarker(0)` on the clip at timeline position 0 | Returns `True` and writes nothing — `tl.GetMarkers()` shows the count unchanged and no marker by that name. **`Timeline.AddMarker(0)` works.** Markers are therefore placed through the timeline, never through the item. An earlier release blamed `Timeline.AddMarker`; that was the same bad setup as above. |
-| `AppendToTimeline` with `recordFrame` below `StartFrame` | **Silently accepted.** Passing `0/200/400` on a timeline that starts at `86400` places the clips at 0/200/400 — outside the timeline's own range — and the timeline's metadata is not reconciled: it reports `StartFrame == EndFrame` (duration 0) while holding three clips. It survives `SetProperty`, closing and reopening. On such a timeline `DeleteGaps` and `SetLeftOffset` do nothing and `Timeline.ExportFrame` refuses every offset, so it looks like three broken APIs. Assert `recordFrame >= GetStartFrame()`. |
-| `AppendToTimeline` with `startFrame` == `endFrame` | Returns `None` and places nothing. With single-frame media (`GetClipProperty("Frames") == "1"`) the natural `endFrame` is `0`, so a "correct" 0..0 range silently fails. Omitting `endFrame` lets Resolve use the whole clip and works. |
-
-**Gotchas**
-
-- `TimelineItem.GetProperty("Position")` returns a **bool** on 21.1.2, not
-  coordinates. The position lives in **`Pan` / `Tilt`** (x/y in pixels).
-  `RotationAngle` is degrees, `Opacity` 0–100, crop values 0–1, `ZoomX/Y` a
-  multiplier. All are writable — verify with a read-back.
-- Setting a timeline's `SetIsEnabled(False)` makes `GetCurrentTimeline()` return
-  `None`, so every later call reports "No current timeline" until it is switched
-  back on in the GUI.
-- `MediaPoolItem.GetParentFolder` is only useful with a recursive walk of the
-  media pool: `ImportMedia` drops clips into the currently *selected* bin, so a
-  root-only lookup reports "not found" while the clip exists one level down.
-
-## Testing
-
-Two layers, because DaVinci Resolve cannot run in CI.
-
-### Offline — no Resolve needed, this is what CI runs
-
-```bash
-python tests/test_offline.py
-```
-
-Checks that `server.py` imports **without** Resolve present (so `pip install`
-followed by `resolve-ext --help` cannot fail), that all fifteen tools register,
-that the CLI returns the right exit codes, and that the platform path
-resolution produces the correct paths for the OS it finds itself on. Runs on
-Windows, macOS and Linux — see `.github/workflows/test.yml`.
-
-### Live — needs a running Resolve Studio
-
-```bash
-python tests/test_e2e.py        # core tools
-python tests/test_phase1.py     # photo albums + node graph
-python tests/test_extras.py     # render presets, audio formats, transcription
-python tests/test_camera.py     # camera layouts, labels, markers, sorting
-
-# point at your own media if ~/Pictures has fewer than 3 PNGs
-RESOLVE_EXT_TEST_MEDIA="D:/stills/*.png" python tests/test_camera.py
-```
-
-**162 assertions, 0 failures** against Resolve Studio 21.1.2.10
-(30 offline + 132 live).
-
-Each suite creates its own scratch project, exercises the tools and deletes it
-again — they never touch your other projects. Two habits are deliberate:
-
-- Assertions check that values **changed and read back**, not merely that no
-  error was returned. A write test that passes because nothing moved proves
-  nothing; that is exactly how `DeleteGaps` and `AddToPhotoAlbum` were caught
-  reporting success while doing nothing.
-- Known-broken calls are asserted to *fail honestly*. If a future Resolve build
-  fixes `AddToPhotoAlbum`, its test will start failing — which is the signal to
-  re-measure and update this README, not a broken test.
-
-## Design notes
-
-- **Extension, not fork.** Nothing here duplicates a mainstream server's
-  surface, so both can run side by side without the model having to choose.
-- **Broken APIs are reported, not hidden.** Where Resolve's own call lies
-  (`DeleteGaps` returning `True`), the tool says so with the measurement
-  attached, rather than emitting a success the caller cannot trust.
-- **Destructive APIs are not exposed.** `SetLeftOffset` cannot be undone through
-  the API, so it stays out of the surface and `get` remains read-only.
-
-## Requirements
-
-- DaVinci Resolve **Studio 21.1.2+** (earlier builds lack these symbols)
-- Windows / macOS / Linux wherever the Resolve scripting API is available
-- Python 3.10+ and `mcp[cli]>=1.30,<2`
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+# resolve-ext
+
+<!-- mcp-name: io.github.CaptRauti/resolve-ext -->
+
+An MCP server that adds the **DaVinci Resolve 21.1.2 and 21.2 scripting
+surfaces the mainstream Resolve MCP servers do not cover** — clip effects,
+effect properties, Paste-Attributes, frame export, thumbnail grids, automatic
+colour, ASC CDL and media-pool folder lookups.
+
+It is deliberately an **extension, not a replacement**: register it alongside
+the other three Resolve MCP servers and you get a larger surface with no overlap —
+see [the full setup](#the-full-resolve-mcp-setup--four-servers-all-of-them).
+Everything it exposes is measured against a live Resolve, and calls that turn
+out to be broken are reported as broken rather than wrapped in a success.
+
+```
+effects              apply/list/remove/toggle/reorder clip effects
+clip_attrs           copy attributes between clips (Paste Attributes)
+export_frame         stills from a clip or media-pool item (+ 21.2 region-of-interest)
+thumbnails           render named frames as one labelled grid image (21.2)
+auto_color           automatic colour on a clip (21.2)
+cdl                  read/write a node's ASC CDL (21.2)
+folder_ops           which bin does this clip/folder live in
+photo_albums         albums, photos, ratings, flags, versions, stills
+node_graph           node labels, colours, enable state, LUTs, cache
+project_extras       render presets, audio render formats, transcription
+jobs                 status of the non-blocking analysis/render jobs (21.1)
+clone_media          MediaStorage Clone Tool: copy a media tree (21.1)
+camera_comparison    2x2 / split layouts, camera labels, markers
+clip_position        move/trim clips, J-cut / L-cut (audio offset)
+resolve_ext_status   health check
+```
+
+## The full Resolve MCP setup — four servers, all of them
+
+Resolve is not covered by one MCP server. **Four independent servers do
+different jobs, and full coverage means running all four.** This project is one
+of them; the other three are not optional extras.
+
+| Server | Origin | Tools | What it is for |
+|---|---|---|---|
+| **Blackmagic's own**<br>`ResolveMCP.exe` | **Ships with DaVinci Resolve 21** — nothing to download | 14 | A *meta-server*: it provides Resolve's scripting-API stubs and a Python sandbox (`run_script`, `search_scripting_api`, `get_whats_new`) plus LUT/DCTL management. It performs no Resolve actions itself. |
+| **community**<br>[`samuelgursky/davinci-resolve-mcp`](https://github.com/samuelgursky/davinci-resolve-mcp) | `npx` or git | 36<br>(349 with `--full`) | The workhorse: editing, media pool, render, markers, grading, Fusion — related operations grouped behind action parameters. The `--full` variant is the same API surface, one tool per method; it costs context, not capability. |
+| **community, advanced**<br>[`davinci-resolve-advanced-mcp`](https://github.com/samuelgursky/davinci-resolve-mcp#advanced-server--beyond-the-scripting-api-optional-node) | same package, Node | 18 | **Beyond the scripting API.** Reads and edits Resolve *files* — `.drp` / `.drt` / `.drx` and the project's SQLite `Project.db` — **with no Resolve running**. Offline grade/QC catalog, conform/relink QC, whole-project node-graph relayout, provenance. Nothing else here can do this. |
+| **this project**<br>`resolve-ext` | pip | 15 | The gaps the other three leave — see the table below. |
+
+The first and third servers drive the same Resolve through the same
+**single-client** scripting API. The advanced server does not talk to Resolve at
+all — it works on the files — so it runs happily alongside them, or on a machine
+where Resolve is not installed.
+
+```bash
+# 1. Blackmagic's — already on disk, just register it:
+#    %ProgramFiles%\Blackmagic Design\DaVinci Resolve\ResolveMCP.exe   (Windows)
+#    /Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Applications/ResolveMCP
+#    /opt/resolve/bin/ResolveMCP                                       (Linux)
+
+# 2. the community server (use --clients manual when driving it non-interactively):
+npx davinci-resolve-mcp setup
+
+# 3. its advanced sibling — offline file access, needs Node and nothing else.
+#    The optional deps are what unlock project_read / conform.verify / pipeline:
+npm install --prefix <checkout>/resolve-advanced --include=optional
+#    then register:  node <checkout>/bin/davinci-resolve-advanced-mcp.mjs
+
+# 4. this project:
+pip install https://github.com/CaptRauti/ResolveMCP-ext/releases/download/v1.0.5/resolve_ext-1.0.5-py3-none-any.whl
+resolve-ext doctor
+```
+
+Full procedure, per-platform paths, the Windows "Resolve is on another drive"
+case, and the failure modes of each: **[AGENTS.md](AGENTS.md)** — written so an
+AI agent can install all four unattended.
+
+## Why this exists
+
+DaVinci Resolve **21.1.2** (22 Oct 2026) added a batch of scripting APIs. The
+popular MCP servers do not implement them — verified two ways: searching their
+source for each symbol, and probing live Resolve objects with `hasattr` (a type
+stub documents the API; only the live object proves your build has it).
+
+| Resolve 21.1.2 symbol | In mainstream MCP servers |
+|---|---|
+| `Resolve.GetEffectsList` | absent |
+| `TimelineItem.AddEffect` / `GetEffects` / `DeleteEffects` | absent |
+| `Effect.GetInfo` / `Get/SetIsEnabled` / `Get/SetIndex` | absent |
+| `TimelineItem.CopyAttributes` | absent |
+| `TimelineItem.ExportFrame` / `MediaPoolItem.ExportFrame` | absent |
+| `MediaPoolItem.GetParentFolder` / `Folder.GetParentFolder` | absent |
+| `TimelineItem.Get/SetLeftOffset` / `GetPosition` | absent |
+| `Timeline.MoveItems` / `DeleteGaps` / `Get/SetIsEnabled` | absent |
+| **Photo Album APIs** (`PhotoAlbum`, `PhotoAlbumItem`, 53 methods) | absent |
+| `Graph.SetNodeLabel` / `Get/SetNodeColor` / `SetNodeEnabled` | absent |
+| `Project.GetAudioRenderFormats` / `GetAudioRenderCodecs` | absent |
+| `Project.UpdateRenderPreset` / `SetQuickExportEnabledForRenderPreset` | absent |
+| `MediaPoolItem.SetTranscription` | absent |
+
+`TimelineItem` alone exposes **113 methods** on 21.1.2; a large share of them
+were unreachable through MCP before this server.
+
+## Install
+
+> **Installing this with an AI agent?** Point it at
+> [AGENTS.md](AGENTS.md) — it is a step-by-step procedure written for agents,
+> including the failure cases. This section is the human-facing version.
+
+Requires **Python 3.10+** and **DaVinci Resolve Studio** (external scripting is
+a Studio feature — the free build refuses it).
+
+### From a release (recommended)
+
+Download the wheel from the [releases page][releases] and install it:
+
+```bash
+pip install resolve_ext-1.0.5-py3-none-any.whl
+```
+
+The wheel is pure Python and platform-independent — the same file works on
+Windows, macOS and Linux.
+
+### From a git checkout
+
+```bash
+pip install git+https://github.com/CaptRauti/ResolveMCP-ext
+```
+
+Or from a local clone:
+
+```bash
+git clone https://github.com/CaptRauti/ResolveMCP-ext
+cd ResolveMCP-ext
+pip install .
+```
+
+`mcp` 2.x breaks FastMCP, so the dependency is pinned `<2`. That pin is in the
+package metadata — you do not need to add it yourself.
+
+### Verify the installation
+
+```bash
+resolve-ext doctor
+```
+
+```
+resolve-ext 1.0.0
+
+--- Python ---
+  3.12.4 at /usr/bin/python3
+  ok (3.10+)
+
+--- DaVinci Resolve scripting API ---
+platform      linux
+api_path      /opt/resolve/Developer/Scripting  (found)
+lib_path      /opt/resolve/libs/fusionscript.so  (found)
+
+--- Import test ---
+  ok: DaVinciResolveScript imports
+
+--- Live connection ---
+  ok: connected to Resolve; project = My Project
+
+--- Result ---
+  All checks passed.
+```
+
+`doctor` exits `0` when everything works and `1` otherwise, so it is usable in
+a setup script. When something is wrong it names the exact path that is missing
+and what to enable.
+
+### Register with your MCP client
+
+The server finds Resolve's scripting API by itself, so on a default
+installation there is **nothing to configure**:
+
+```json
+{
+  "mcpServers": {
+    "resolve-ext": { "command": "resolve-ext" }
+  }
+}
+```
+
+For a non-standard Resolve location, or to see the explicit form, run:
+
+```bash
+resolve-ext env
+```
+
+which prints the configuration for the machine it runs on — including the exact
+`RESOLVE_SCRIPT_API`, `RESOLVE_SCRIPT_LIB` and `PYTHONPATH` values — as generic
+JSON and as a `hermes mcp add` command.
+
+When merging into an existing client config, the server entry sits **flat**
+under the client's own `mcpServers` key. Do not wrap it in a second
+`mcpServers` level — that silently disables tool discovery.
+
+### Resolve settings
+
+Resolve must be running with **Preferences → System → General → External
+scripting using → Local**.
+
+[releases]: https://github.com/CaptRauti/ResolveMCP-ext/releases
+
+## Tools
+
+### `effects`
+
+```
+list_available(media_type?)          video (default) | photo | audio
+list_applied(item_id?|name?, category?)
+apply(item_id?|name?, category, id)
+remove(item_id?|name?, category, indices?)
+set_enabled(item_id?|name?, index, enabled, category?)
+reorder(item_id?|name?, index, new_index, category?)
+```
+
+Address a timeline item with `item_id` (`GetUniqueId`) or with `name` plus the
+track it sits on (`track_type` default `video`, `track_index` default `1`).
+
+Always call `list_available` first — `apply` needs the `category` and `id` it
+returns. On a stock 21.1.2 Studio that is **36 fusion + 98 ofx** effects for
+`video`, plus the Fairlight set for `audio`. Fusion ids look like
+`Fusion/Effects/<category>/<name>`.
+
+### `clip_attrs`
+
+```
+options()                                    the full option vocabulary
+copy(source_id?|source_name?, target_ids?|target_names?, options, ...)
+read(item_id?|name?)
+```
+
+The API behind the Edit page's **Paste Attributes** — the lever that makes a
+per-camera look repeatable: grade one clip, push the same attributes onto every
+other clip from that camera.
+
+36 options in 6 groups (`clip`, `video`, `zoom_crop_flip`, `retime`,
+`grade_fusion`, `audio`). Shorthands: `copy_all_video`, `copy_all_audio`.
+
+```json
+{"colorCorrection": true, "allZoomAttributes": true,
+ "allCropAttributes": true, "videoPlugins": true}
+```
+
+### `export_frame`
+
+```
+item(item_id?|name?, frame_offset, output_type?, file_path?, format?, max_dimension?,
+     quality?, roi_x?, roi_y?, roi_width?, roi_height?)
+media(clip_id, frame_offset, output_type?, file_path?, format?, max_dimension?)
+timeline(frame_offset, ...)     # offset is RELATIVE to the timeline start
+```
+
+`item` and `media` are verified working. The offset is 0-based and must be
+below the item's duration. `output_type`: `file` (needs `file_path`) or
+`encodedString` (default); for the latter the base64 is decoded and written to
+`out/` next to the server, with only a short prefix returned inline.
+
+**21.2 adds a normalised region of interest.** `roi_x`/`roi_y`/`roi_width`/
+`roi_height` are fractions of the frame (0..1, default the whole frame) and
+`quality` is JPEG 1-100. The fractions are per-axis, so equal width and height
+is *not* a square region on a non-square frame. Verified live on 21.2.0.6:
+`roi 0.25/0.25/0.5/0.5` with `max_dimension=512` returns a 512x288 still —
+a cropped frame without a render.
+
+### `thumbnails` (21.2)
+
+```
+item(item_id?|name?, frames, track_type?, track_index?, ...)
+timeline(frames, ...)
+media(clip_id, frames, ...)
+album(album_id?|album_name?, frames, ...)
+```
+
+Renders several named frames into **one labelled grid image** — the whole look
+across a clip reads back in a single sheet instead of N stills. Resolve fills
+the grid left-to-right/top-to-bottom in the order given and captions each cell.
+
+`frames` is a list of ints, or of `{frameOffset, label}` dicts to caption cells
+yourself (a timecode, a clip name). Offsets are 0-based — from the item's start
+for `item`/`media`, from the timeline start for `timeline`; `album` uses 1-based
+photo positions. `output_type` is `file` (needs `file_path`, **the extension is
+required** — without one Resolve answers `filePath must have a valid image file
+extension`) or `encodedString` (default, decoded to `out/`). `max_dimension`
+caps the longer edge of the *whole sheet*, so more frames means smaller cells.
+
+Returns `{success, target, sheet:{width,height,columns,rows,cellWidth,
+cellHeight}, path|saved_to, bytes}`. Verified live on 21.2.0.6 on all four
+targets.
+
+### `auto_color` (21.2)
+
+```
+apply(item_id?|name?, track_type?, track_index?)
+status(item_id?|name?, ...)
+enable | disable(item_id?|name?, ...)
+clear(item_id?|name?, ...)
+```
+
+Automatic colour on a timeline clip. `ApplyAutoColor` grades the clip and turns
+the auto-colour flag on; `clear` removes it; `enable`/`disable` toggle a grade a
+previous `apply` already made — so calling `enable` *first* legitimately returns
+`changed: false`. **The Color page must be showing** (on Edit the identical
+calls return `False` and change nothing — measured); the tool switches to Color
+itself and reports `page_switched_from` when it did.
+
+Works on a photo album item too: pass `target="photo"` with `photo_id`, or
+`photo_name` plus `album_id`/`album_name`. Verified on 21.2.0.6.
+
+### `cdl` (21.2)
+
+```
+get(item_id?|name?, node_index?, track_type?, track_index?)
+set(item_id?|name?, node_index?, slope?, offset?, power?, saturation?, ...)
+```
+
+Reads or writes the ASC CDL of a clip's node. Values are space-separated RGB
+strings, e.g. `slope="1.1 1.0 0.9"`, `offset="0.0 0.0 0.0"`; `saturation` is a
+float (1.0 neutral). A set/read round-trip returns exactly the values written.
+`get` needs `node_index` — without it the API returns `None`, which reads like
+an empty result but is just a missing argument. **Color page required**, same as
+`auto_color`. Works on a photo album item with `target="photo"`.
+
+**Pass any subset of the four values.** SetCDL itself needs *all four* keys: a
+partial dict returns `False` and changes nothing (measured on 21.2.0.6 — slope
+alone, slope+offset and slope+offset+power all failed; only the full set
+applied). The tool therefore reads the node's current CDL and overlays what you
+passed, so `slope` alone works and leaves offset/power/saturation as they were.
+
+### `folder_ops`
+
+```
+parent_of_clip(clip_id)              which bin holds this clip
+parent_of_folder(path?|folder_id?)   a folder's parent (root has none)
+path(clip_id?|folder_id?)            "Master/Sub/Bin"
+find_clip(clip_id)                   locate a clip anywhere in the tree
+```
+
+### `photo_albums`
+
+```
+list() / current() / set_current(album_id?|name?)
+create(name) / create_from_photos(name, clip_ids) / delete(album_ids?) / rename(...)
+quick_export_presets() / render_settings(settings?)
+photos(album_id?|name?) / add_photos(clip_ids) / remove_photos(photo_ids) / current_item()
+stills(album_id?|name?, all_photos?)
+photo(photo_id) / rate(photo_id, stars) / flag(photo_id, color?|clear?)
+clip_color(photo_id, color?|clear?) / versions(photo_id)
+add_version / load_version / delete_version
+copy_grade / effects_list / effect_apply / effect_remove / fusion_comps / fusion_add
+```
+
+Verified working on 21.1.2.10: **9/9 `PhotoAlbum` methods, 20/20
+`PhotoAlbumItem` methods**, `CreatePhotoAlbumFromPhotos`, persistent ratings /
+flags / versions, `AddFusionComp` on a photo.
+
+`add_photos` is **broken upstream** (`AddToPhotoAlbum` adds nothing) — the
+action verifies by reading the album back and tells you so. Use
+**`create_from_photos`**, which is the verified path.
+
+> Note the split: the album *listing* methods live on `Project`, the
+> *creating/adding* ones on `MediaPool`, and Resolve answers none of them. The
+> tool resolves the right object per call, because a Resolve proxy makes
+> `hasattr` report every method on every object.
+
+### `node_graph`
+
+```
+info(item_id?|name?|photo_id?)        node list with labels, colours, enabled
+label(node_index, label)              "" clears the label
+color(node_index, color)              "" clears the colour
+enable(node_index, enabled)
+tools(node_index)                     which Fusion/OFX tools sit in the node
+lut(node_index, lut_path?)            read, or set
+cache(node_index, mode?)              read, or set
+reset_colors()                        photo graphs only
+reset_grades(confirm=true)            destructive — clears the whole grade
+```
+
+Valid node colours: Orange, Apricot, Yellow, Lime, Olive, Green, Teal, Navy,
+Blue, Purple, Violet, Pink, Tan, Beige, Brown, Chocolate.
+
+Target a timeline clip by `item_id`/`name`, or a photo by `photo_id`. Labels
+and colours verified persistent across calls.
+
+`info` also reports each node's `enabled` flag via `Graph.GetNodeEnabled`, new
+in 21.2 (verified there). On an older build that call fails and the key is
+omitted rather than reported as a false `False`.
+
+### `project_extras`
+
+```
+capabilities()                             what this build answers at all
+render_presets()                           GetRenderPresetList
+update_render_preset(preset_name)          GUI-dependent, see the broken table
+quick_export_enable(preset_name, enabled)  GUI-dependent
+audio_formats()                            {display name -> extension}
+audio_codecs(format_extension)             {description -> codec name}
+transcription(clip_id, use_nested?)        a clip's transcript
+set_transcription(clip_id, transcription)  verified by reading back
+playback_frame_rate()                      project playback vs timeline rate (21.2)
+set_playback_frame_rate(rate)              SetSetting, read back (21.2)
+extras_list()                              Extras Download Manager packages (21.2)
+extras_install(name) / extras_uninstall(name)  queues a download / removal (21.2)
+```
+
+`audio_formats` / `audio_codecs` VERIFIED: 7 real formats
+(`FLAC, MP3, MP4, MXF OP-Atom, MXF OP1A (IMF), QuickTime, Wave`) and their
+codecs. `render_presets` VERIFIED: 37 real presets.
+
+The 21.2 additions: `playback_frame_rate` reads
+`timelinePlaybackFrameRate` (settable since 21.2 — verified: set `'25'`, read
+back `'25'`, while `timelineFrameRate` stays 24.0) and `extras_list` returns the
+6 AI packages Resolve offers on this machine with status/progress/size.
+`extras_install`/`extras_uninstall` **download from Blackmagic** (or cancel a
+running download) — they are not reads; poll `extras_list` for progress.
+Note: Resolve reports a negative `downloadSize` for some entries (e.g. AI Voice
+Training) — a quirk of its own data, passed through as-is.
+
+### `jobs` (21.1)
+
+```
+async_status()                            every job status getter in one call
+render_job(job_id)                        Project.GetRenderJobStatus
+```
+
+21.1 made the analysis APIs **non-blocking**: the call queues the job and you
+poll. Neither the upstream server nor this one exposed the getters, so a caller
+could start a transcription or a scene-cut analysis and never learn whether it
+finished. `async_status` reads all six — transcribe audio, analyze for slate,
+smart reframe, detect scene cuts, create subtitles from audio, render with quick
+export. Each returns `{JobStatus, CompletionPercentage, …}`; a `null` entry means
+this build does not answer that getter.
+
+### `clone_media` (21.1)
+
+```
+status()                                  GetCloneStatus
+settings(preserve_folder_name?, checksum_type?)   SetCloneToolSettings
+start(source_dir, target_dirs, …)         StartCloneMedia
+stop()                                    StopCloneMedia
+```
+
+The MediaStorage Clone Tool — copy a directory tree of media to one or more
+targets, with optional checksum verification (`none`, `filesize`, `crc32`,
+`md5`, `sha256`, `sha512`, `xxh64`). The upstream server has no coverage at all,
+so a scripted media migration had no route.
+
+The copy runs in the **background**: `start` returns as soon as the job is
+queued (`JobStatus: InProgress`), so poll `status` until `Complete`. Verified
+end-to-end on 21.2.0.6: a source file was queued, copied, and a checksum
+manifest landed beside it.
+
+**Windows path gotcha:** Resolve rejects **forward slashes** here — it returns
+`False` and copies nothing (measured: `C:/…` fails, `C:\…` works). The tool
+converts, so either style is fine to pass.
+
+### `camera_comparison`
+
+```
+detect()                 which camera each clip is (from its name)
+grid_2x2()               four cameras in quadrants, scale 0.5
+split_h() / split_v()    two-up, side by side or stacked
+layout(assignments)      explicit {clip_id: {x, y, scale}} — fractions of raster
+fullframe(clip_ids)      back to 1.0 zoom, centred
+markers()                timeline markers naming each camera
+sort_to_bins()           file clips into per-camera bins by name
+build_timeline()         one video track per camera, scenes synced
+read()                   current transform of every clip
+```
+
+Camera detection, longest prefix first:
+
+| prefix | camera | marker |
+|---|---|---|
+| `ace*` | Insta360 AcePro | Orange |
+| `go*` | Insta360 Go Ultra | Green |
+| `luna*` | Insta360 Luna Ultra | Cyan |
+| `x*` | Insta360 X5 | Blue |
+| `vid_*` | Handy (Android file) | Gray |
+
+**Why this tool exists:** the loose scripts this replaces positioned clips
+with `SetProperty("PositionX", …)` / `"PositionY"`. MEASURED on 21.1.2.10 those
+keys return **`False` and are silently ignored** — `GetProperty` gives back
+`False` too. Zoom worked, the positioning never did. The real keys are **`Pan`**
+(x, +right) and **`Tilt`** (y, **+up**), in pixels. Every write here is read
+back, and a transform that does not stick is reported as a failure.
+
+Verified: on a 3840x2160 timeline `grid_2x2` puts AcePro at `Pan -960, Tilt
+540` (top-left) and Go Ultra at `Pan 960, Tilt 540` (top-right), read back.
+
+### `clip_position`
+
+```
+get(item_id?|name?)                                 position + handle offsets (read-only)
+set(start_frame?|new_track_index?, move_linked?)    move the clip
+move(items=[…], move_linked?)                       move several in one call
+set_offset(left?|right?, update_linked_items?)      head/tail trim, with readback
+j_l_cut(offset_frames, …)                           J-cut / L-cut: shift only the audio
+delete_gaps()                                       close the gaps between clips
+enabled()                                           timeline enabled state
+```
+
+`set_offset` sets the **trim** at an edit point: `left=n` makes the clip begin
+`n` frames into its source. Measured on a clip at 86400 with source range 0–71:
+`left=5` gave start 86405 / source_start 5 / duration 67, and `left=0` restored
+it exactly — it is fully reversible. A negative value extends into the head
+handle and returns `False` when no handle is left.
+
+`j_l_cut` is the J-cut / L-cut primitive, and the reason this tool grew.
+`offset_frames` negative starts the audio earlier than its picture (J-cut — the
+next sound leads the image); positive starts it later (L-cut — the sound
+outlasts the image). It uses `Timeline.MoveItems(..., moveLinkedItems=False)`, so
+the picture does not move and the pair stays linked with the offset intact.
+Measured: an L-cut of +24 moved the audio 86400 → 86424; a real J-cut of −12 on
+a clip with a predecessor moved its audio 86496 → 86484, and Resolve trimmed the
+predecessor's audio tail to make room — exactly what a J-cut does in the NLE.
+
+Two traps it wraps up for you: a clip appended with `mediaType=1` lands as
+**video only**, so there is no audio to offset (append without `mediaType`); and
+a J-cut needs a **predecessor** — Resolve refuses to place audio before the
+timeline's `StartFrame`, and the tool says so rather than reporting a bare
+failure.
+
+## Measured behaviour on Resolve 21.2.0.6
+
+Everything below was measured against a live Studio build, not read from docs.
+`tests/` reproduces it — 132 assertions across four suites, 0 failures.
+
+**Re-measured on 21.2.0.6 and WITHDRAWN:** `TimelineItem.SetPosition`,
+`Timeline.MoveItems` and `TimelineItem.SetLeftOffset` were recorded here as
+broken or destructive on 21.1.2.10. All three work, and `SetLeftOffset` is
+reversible. The destructive reading came from a timeline whose
+`StartFrame == EndFrame` (duration 0) while still holding clips — the
+`AppendToTimeline` entry below is the real root cause. Reported upstream as
+issue #336.
+
+**Working**
+
+| Call | Result |
+|---|---|
+| `Resolve.GetEffectsList` | 36 fusion + 98 ofx (video), Fairlight (audio) |
+| `TimelineItem.AddEffect` / `GetEffects` / `DeleteEffects` | verified end to end |
+| `Effect.GetInfo` / `GetIsEnabled` / `SetIsEnabled` / `GetIndex` | verified |
+| `TimelineItem.CopyAttributes` | verified with changed source values |
+| `TimelineItem.ExportFrame` | offsets `0..duration-1` succeed, beyond is refused |
+| `MediaPoolItem.ExportFrame` | verified, file written |
+| `MediaPoolItem` / `Folder.GetParentFolder` | verified |
+| `Timeline.GetIsEnabled` / `SetIsEnabled` | verified |
+
+**Broken or destructive — do not use**
+
+| Call | Measured behaviour |
+|---|---|
+| `TimelineItem.SetPosition` | **Works** on 21.2.0.6 — a clip at 86400 moved to 86800, confirmed by both `GetPosition` and `GetStart`; `Timeline.MoveItems` likewise (→ 87000). An earlier release recorded both as returning `False` for **every** input; that measurement ran on a timeline reporting `StartFrame == EndFrame` — see the `AppendToTimeline` entry. |
+| `Timeline.ExportFrame` | **Works** — `frameOffset` is relative to the timeline start, valid `0..duration-1`. Verified on a 480-frame timeline: 0..479 succeed, 480 is refused. An absolute frame is always refused, which reads like a failure. An earlier release listed this as broken; that was a bad measurement on a timeline whose metadata contradicted its contents. |
+| `Timeline.DeleteGaps` | **Works** — verified `[86400, 86600, 86800]` → `[86400, 86520, 86640]`, gaps closed. It does nothing on a timeline that reports `StartFrame == EndFrame` while holding clips; see the `AppendToTimeline` entry below. |
+| `TimelineItem.SetLeftOffset` | **Works, and is reversible** on 21.2.0.6 — it sets the HEAD trim: `left=5` on a clip at 86400 with source range 0–71 gave start 86405 / source_start 5 / duration 67, and `left=0` restored it exactly. A negative value extends into the head handle and returns `False` when no handle is left. The earlier "moved to −85995, not restorable" reading came from the same duration-0 timeline as the `SetPosition` entry. |
+| `MediaPool.AddToPhotoAlbum` | Adds nothing and returns an empty list. Tested four ways: immediately after `CreateEmptyPhotoAlbum`, with a 2 s pause, after an explicit `SetCurrentPhotoAlbum` that `GetCurrentPhotoAlbum` confirmed, and with a fresh album each time — zero photos every run. `MediaPool.CreatePhotoAlbumFromPhotos` VERIFIED working (photos land and read back), so use that. |
+| `Graph.ResetAllNodeColors` | Exists on a photo album item's graph but **not** on a timeline clip's graph (`NoneType is not callable`). Clearing a colour with `SetNodeColor(i, "")` works on both. |
+| `MediaPoolItem.GetNodeGraph` | Not callable on 21.1.2.10 (while `TimelineItem.GetNodeGraph` and `PhotoAlbumItem.GetNodeGraph` both work). Put the clip on a timeline and address it by `item_id`. |
+| `Project.UpdateRenderPreset` | Returns `False` for all 37 factory presets that `GetRenderPresetList` reports (`'H.264 Master'` included). `Project.SaveRenderPreset` does not exist in the API, so a user preset cannot be created from scripting to test against. GUI-dependent at best. |
+| `Project.SetQuickExportEnabledForRenderPreset` | Same shape: `False` for a factory preset. |
+| `MediaPoolItem.SetTranscription` | Returns `False` for a PNG still **and** for a real video clip with no transcript, with both `'01:00:00:00'` and `'00:00:00:00'` start timecodes. It *replaces* a transcript, so it appears unable to create one where none exists. |
+| `MediaPoolItem.SetClipColor` (photo items) | Returned `False` for `'Sky'` on a photo album item while the colour list is documented; `ClearClipColor` works. The action reports the rejection rather than assuming success. |
+| `Folder.AddSubFolder` / `Folder.MoveClips` | Do not exist. Both live on **MediaPool** (`mp.AddSubFolder(parent, name)`, `mp.MoveClips(clips, folder)`) — verified that `MoveClips` really relocates the clip and returns `True`, not a false success. Same object-split as the photo-album API. |
+| `TimelineItem.SetProperty("PositionX"/"PositionY")` | **Silently ignored** — both the setter and the getter return `False`. Use `Pan` / `Tilt` (pixels, +x right, +y up). This is what broke the project's own grid scripts: zoom applied, positions never did. |
+| `TimelineItem.AddMarker(0)` on the clip at timeline position 0 | Returns `True` and writes nothing — `tl.GetMarkers()` shows the count unchanged and no marker by that name. **`Timeline.AddMarker(0)` works.** Markers are therefore placed through the timeline, never through the item. An earlier release blamed `Timeline.AddMarker`; that was the same bad setup as above. |
+| `AppendToTimeline` with `recordFrame` below `StartFrame` | **Silently accepted.** Passing `0/200/400` on a timeline that starts at `86400` places the clips at 0/200/400 — outside the timeline's own range — and the timeline's metadata is not reconciled: it reports `StartFrame == EndFrame` (duration 0) while holding three clips. It survives `SetProperty`, closing and reopening. On such a timeline `DeleteGaps` and `SetLeftOffset` do nothing and `Timeline.ExportFrame` refuses every offset, so it looks like three broken APIs. Assert `recordFrame >= GetStartFrame()`. |
+| `AppendToTimeline` with `startFrame` == `endFrame` | Returns `None` and places nothing. With single-frame media (`GetClipProperty("Frames") == "1"`) the natural `endFrame` is `0`, so a "correct" 0..0 range silently fails. Omitting `endFrame` lets Resolve use the whole clip and works. |
+
+**Gotchas**
+
+- `TimelineItem.GetProperty("Position")` returns a **bool** on 21.1.2, not
+  coordinates. The position lives in **`Pan` / `Tilt`** (x/y in pixels).
+  `RotationAngle` is degrees, `Opacity` 0–100, crop values 0–1, `ZoomX/Y` a
+  multiplier. All are writable — verify with a read-back.
+- Setting a timeline's `SetIsEnabled(False)` makes `GetCurrentTimeline()` return
+  `None`, so every later call reports "No current timeline" until it is switched
+  back on in the GUI.
+- `MediaPoolItem.GetParentFolder` is only useful with a recursive walk of the
+  media pool: `ImportMedia` drops clips into the currently *selected* bin, so a
+  root-only lookup reports "not found" while the clip exists one level down.
+
+## Testing
+
+Two layers, because DaVinci Resolve cannot run in CI.
+
+### Offline — no Resolve needed, this is what CI runs
+
+```bash
+python tests/test_offline.py
+```
+
+Checks that `server.py` imports **without** Resolve present (so `pip install`
+followed by `resolve-ext --help` cannot fail), that all fifteen tools register,
+that the CLI returns the right exit codes, and that the platform path
+resolution produces the correct paths for the OS it finds itself on. Runs on
+Windows, macOS and Linux — see `.github/workflows/test.yml`.
+
+### Live — needs a running Resolve Studio
+
+```bash
+python tests/test_e2e.py        # core tools
+python tests/test_phase1.py     # photo albums + node graph
+python tests/test_extras.py     # render presets, audio formats, transcription
+python tests/test_camera.py     # camera layouts, labels, markers, sorting
+
+# point at your own media if ~/Pictures has fewer than 3 PNGs
+RESOLVE_EXT_TEST_MEDIA="D:/stills/*.png" python tests/test_camera.py
+```
+
+**162 assertions, 0 failures** against Resolve Studio 21.1.2.10
+(30 offline + 132 live).
+
+Each suite creates its own scratch project, exercises the tools and deletes it
+again — they never touch your other projects. Two habits are deliberate:
+
+- Assertions check that values **changed and read back**, not merely that no
+  error was returned. A write test that passes because nothing moved proves
+  nothing; that is exactly how `DeleteGaps` and `AddToPhotoAlbum` were caught
+  reporting success while doing nothing.
+- Known-broken calls are asserted to *fail honestly*. If a future Resolve build
+  fixes `AddToPhotoAlbum`, its test will start failing — which is the signal to
+  re-measure and update this README, not a broken test.
+
+## Design notes
+
+- **Extension, not fork.** Nothing here duplicates a mainstream server's
+  surface, so both can run side by side without the model having to choose.
+- **Broken APIs are reported, not hidden.** Where Resolve's own call lies
+  (`DeleteGaps` returning `True`), the tool says so with the measurement
+  attached, rather than emitting a success the caller cannot trust.
+- **Destructive APIs are not exposed.** `SetLeftOffset` cannot be undone through
+  the API, so it stays out of the surface and `get` remains read-only.
+
+## Requirements
+
+- DaVinci Resolve **Studio 21.1.2+** (earlier builds lack these symbols)
+- Windows / macOS / Linux wherever the Resolve scripting API is available
+- Python 3.10+ and the MCP Python SDK. `pyproject.toml` pins
+  `mcp[cli]>=1.30,<2`, but the server also **runs on mcp 2.x**: the SDK
+  renamed `FastMCP` to `MCPServer` there, and the import picks whichever is
+  installed. The 15 tools use only the surface both generations share, so a
+  stray mcp 2.x in the environment degrades nothing. CI tests both.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

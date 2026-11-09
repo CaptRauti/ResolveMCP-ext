@@ -153,7 +153,76 @@ for name, want in [("ace1.mp4", ("Insta360 AcePro", "Orange")),
     got = server._camera_of(name)
     check(f"_camera_of({name!r}) -> {want[0]}", got == want, str(got))
 
-print("\n=== 9. Alle Quelldateien parsen ===")
+print("\n=== 9. Beide MCP-SDK-Generationen (1.x FastMCP / 2.x MCPServer) ===")
+# pyproject pins mcp<2, but a user's environment can already carry mcp 2.x,
+# and then the pin does not save them: pip only warns. The server must import
+# and list its tools on both SDK generations instead of dying with a
+# ModuleNotFoundError before it can answer even `--version` or `doctor`.
+check("SDK-Generation erkannt", getattr(server, "SDK_MAJOR", 0) in (1, 2),
+      f"SDK_MAJOR={getattr(server, 'SDK_MAJOR', None)}")
+check("Server-Objekt konstruiert", server.mcp is not None,
+      type(server.mcp).__name__ if server.mcp is not None else "None")
+
+# The tool surface is what the client sees, so prove it survives the SDK
+# switch by driving a real stdio handshake against a child process.
+import json
+import subprocess
+
+_child = subprocess.Popen(
+    [sys.executable, os.path.join(ROOT, "server.py")],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    text=True, bufsize=1, cwd=ROOT)
+
+
+def _rpc(obj, want_id):
+    """Send one message and wait for its reply (None on EOF).
+
+    The handshake must be interactive. Writing initialize, initialized and
+    tools/list as one burst and closing stdin races the shutdown, and the
+    tools/list reply is then sometimes lost (measured on mcp 1.30: 2 of 6
+    runs). A real client keeps the pipe open and waits per request — that
+    form was 6 of 6 on both SDK generations.
+    """
+    _child.stdin.write(json.dumps(obj) + "\n")
+    _child.stdin.flush()
+    while True:
+        _line = _child.stdout.readline()
+        if not _line:
+            return None
+        try:
+            _obj = json.loads(_line)
+        except Exception:
+            continue
+        if _obj.get("id") == want_id:
+            return _obj
+
+
+try:
+    _init = _rpc({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": {"name": "test_offline", "version": "0"}}}, 1)
+    _child.stdin.write(json.dumps(
+        {"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+    _child.stdin.flush()
+    _list = _rpc({"jsonrpc": "2.0", "id": 2, "method": "tools/list",
+                  "params": {}}, 2)
+    _info = ((_init or {}).get("result") or {}).get("serverInfo") or {}
+    _names = sorted(t["name"] for t in
+                    ((_list or {}).get("result") or {}).get("tools") or [])
+    check("stdio-Handshake antwortet mit serverInfo", bool(_info), str(_info))
+    check("serverInfo meldet den Namen ResolveMCP-ext",
+          _info.get("name") == "ResolveMCP-ext", str(_info.get("name")))
+    check("serverInfo traegt eine Version (nicht leer wie mcp 2.x ohne version=)",
+          bool(_info.get("version")), str(_info.get("version")))
+    check(f"tools/list liefert 15 Tools (SDK {getattr(server, 'SDK_MAJOR', '?')})",
+          len(_names) == 15, str(_names))
+except Exception as exc:  # pragma: no cover
+    check("stdio-Handshake laeuft", False, f"{type(exc).__name__}: {exc}")
+finally:
+    _child.kill()
+
+
+print("\n=== 10. Alle Quelldateien parsen ===")
 for base, _dirs, files in os.walk(ROOT):
     if ".git" in base or "__pycache__" in base:
         continue

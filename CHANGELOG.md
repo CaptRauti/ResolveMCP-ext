@@ -4,6 +4,42 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.5] — 2026-11-09
+
+### Fixed
+
+- **The server now runs on mcp 2.x as well as 1.x.** mcp 2.0 renamed the SDK's
+  server class: `from mcp.server.fastmcp import FastMCP` raised a bare
+  `ModuleNotFoundError`. Because that import sits at module level, it took the
+  whole file down — `resolve-ext --version` and `resolve-ext doctor` failed too,
+  i.e. exactly the two commands a user reaches for to find out what is wrong.
+  The import now tries `mcp.server.mcpserver.MCPServer` first and falls back to
+  `mcp.server.fastmcp.FastMCP`, exposing the generation as `server.SDK_MAJOR`.
+
+  The `mcp[cli]>=1.30,<2` pin stays (v1 is the supported line and the pin is
+  still the right default), but a pin does not protect a user whose environment
+  already carries mcp 2.x: pip only *warns* on the conflict. Measured against
+  **mcp 2.3.0**: 15 tools registered and listed over stdio, a real
+  `resolve_ext_status` call returned the live connection
+  (`DaVinci Resolve Studio 21.2.0.6`, project `MCP_212_Tools`), and `doctor`
+  passed end to end. The 15 tools use only the surface the SDK's own migration
+  guide lists as unchanged (`@mcp.tool()` with the same handler signatures,
+  plain dict returns, `mcp.run()` for stdio) — so this is a two-line import,
+  not a port.
+
+- **`serverInfo` carries the server version again on mcp 2.x.** v2 reports an
+  empty version unless it is passed to the constructor; it is now passed.
+
+### Added
+
+- **Offline suite section 9** — asserts the SDK generation was detected,
+  constructs the server object, and drives a real stdio `initialize` +
+  `tools/list` handshake against a child process, checking `serverInfo` and the
+  15 tool names. Runs on whichever SDK is installed, so the suite can be run
+  once per generation.
+- **CI job `sdk2`** — installs the package with `mcp[cli]>=2,<3`, runs the CLI
+  and the full offline suite against it, so the dual import cannot regress.
+
 ## [1.0.4] — 2026-11-09
 
 ### Added

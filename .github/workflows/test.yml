@@ -46,6 +46,34 @@ jobs:
           pip install build
           python -m build
 
+  sdk2:
+    # pyproject pins mcp<2, but a pin only warns when it is violated: a user who
+    # installs into an environment that already carries mcp 2.x gets a server
+    # that dies at import. This job keeps the dual-SDK import honest.
+    name: mcp 2.x compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install with mcp 2.x
+        run: |
+          python -m pip install --upgrade pip
+          pip install . --no-deps
+          pip install "mcp[cli]>=2,<3"
+          python -c "import mcp, importlib.metadata as m; print('mcp', m.version('mcp'))"
+
+      - name: The CLI must work even on an SDK it was not pinned to
+        run: |
+          resolve-ext --version
+          resolve-ext --help
+
+      - name: Offline checks against mcp 2.x
+        run: python tests/test_offline.py
+
   live-skip-notice:
     name: live suites (informational)
     runs-on: ubuntu-latest

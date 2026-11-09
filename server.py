@@ -21,7 +21,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional
 
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 
 # --- locating DaVinci Resolve --------------------------------------------
 #
@@ -258,12 +258,50 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     # Default: be a stdio MCP server.
+    if mcp is None:
+        # Neither SDK generation imported: say so here instead of dying at
+        # module import, so `resolve-ext doctor` stays usable.
+        print(
+            'resolve-ext: the MCP Python SDK is not installed. '
+            'Install it with: pip install "mcp[cli]>=1.30" '
+            '(both SDK generations work: 1.x FastMCP or 2.x MCPServer)',
+            file=sys.stderr,
+        )
+        return 1
     apply_resolve_env()
     mcp.run()
     return 0
 
 
-from mcp.server.fastmcp import FastMCP
+# --- the MCP SDK ---------------------------------------------------------
+#
+# Two SDK generations are in the wild under the same package name, and the
+# difference is a hard ImportError, not a deprecation:
+#
+#   mcp 1.x  ->  from mcp.server.fastmcp import FastMCP
+#   mcp 2.x  ->  from mcp.server.mcpserver import MCPServer  (FastMCP renamed)
+#
+# pyproject pins `<2`, but a pin does not protect a user who installs into an
+# environment that already carries mcp 2.x (`pip install --force-reinstall`,
+# an MCP client's own venv, `pip install .` with the pin relaxed later). In
+# that case the server used to die with a ModuleNotFoundError *before* it
+# could parse its own arguments — so even `resolve-ext --version` and
+# `resolve-ext doctor` were unusable, which is exactly where a user would go
+# to find out what is wrong.
+#
+# The 15 tools only use the surface the migration guide lists as unchanged
+# (`@mcp.tool()` with the same handler signatures, plain dict returns,
+# `mcp.run()` for stdio). So supporting both is a two-line import, not a port.
+try:  # mcp 2.x
+    from mcp.server.mcpserver import MCPServer as _MCP_SERVER_CLASS
+    SDK_MAJOR = 2
+except ImportError:  # pragma: no cover - depends on the installed SDK
+    try:  # mcp 1.x
+        from mcp.server.fastmcp import FastMCP as _MCP_SERVER_CLASS
+        SDK_MAJOR = 1
+    except ImportError:  # neither: leave it to the run path to explain
+        _MCP_SERVER_CLASS = None
+        SDK_MAJOR = 0
 
 # --- Resolve connection -------------------------------------------------
 
@@ -415,7 +453,15 @@ def _effect_info(eff) -> Dict[str, Any]:
     }
 
 
-mcp = FastMCP("ResolveMCP-ext")
+if _MCP_SERVER_CLASS is not None:
+    if SDK_MAJOR == 2:
+        # `version` is display-only; v2 reports an empty string unless it is
+        # passed, and the tool surface tells a client which build answered it.
+        mcp = _MCP_SERVER_CLASS("ResolveMCP-ext", version=__version__)
+    else:
+        mcp = _MCP_SERVER_CLASS("ResolveMCP-ext")
+else:  # pragma: no cover - only reachable without either SDK generation
+    mcp = None
 
 
 # --- camera comparison helpers -------------------------------------------
