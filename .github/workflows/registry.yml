@@ -48,17 +48,27 @@ jobs:
       - name: Confirm the package really is on PyPI
         # The registry rejects an entry whose package cannot be resolved. Fail
         # here with a clear message instead of letting publish report it.
+        #
+        # Check the VERSION-SPECIFIC endpoint, not /pypi/<name>/json. The
+        # generic endpoint is CDN-cached and still served the previous version
+        # while v1.0.5 was being uploaded, so it also only ever proved that
+        # SOME version existed - a missing upload would have slipped through
+        # and the registry would then have been told about a version that
+        # cannot be installed. The version endpoint is not cached.
         run: |
           python - <<'PY'
           import json, sys, urllib.request
-          name = json.load(open("server.json"))["packages"][0]["identifier"]
-          url = f"https://pypi.org/pypi/{name}/json"
+          spec = json.load(open("server.json"))["packages"][0]
+          name, want = spec["identifier"], spec["version"]
+          url = f"https://pypi.org/pypi/{name}/{want}/json"
           try:
               with urllib.request.urlopen(url, timeout=20) as r:
                   info = json.load(r)["info"]
           except Exception as e:
-              sys.exit(f"ERROR: {name} not resolvable on PyPI ({e}). Publish it first.")
-          print(f"ok: {info['name']} {info['version']} is on PyPI")
+              sys.exit(f"ERROR: {name} {want} is not resolvable on PyPI ({e}). Publish it first.")
+          if info["version"] != want:
+              sys.exit(f"ERROR: asked for {want}, PyPI answered {info['version']}")
+          print(f"ok: {name} {want} is on PyPI")
           PY
 
       - name: Log in with GitHub OIDC
