@@ -71,11 +71,44 @@ jobs:
           print(f"ok: {name} {want} is on PyPI")
           PY
 
+      - name: Check whether this version is already published
+        # The registry rejects a duplicate version with HTTP 400, so a re-run
+        # of this workflow for a release that already went through would fail
+        # and paint a healthy release red. The GitHub release job is already
+        # idempotent (it clobbers assets); make this one idempotent too by
+        # asking the registry first and skipping the publish when the exact
+        # version is present.
+        id: check
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, sys, urllib.parse, urllib.request
+          spec = json.load(open("server.json"))
+          name, want = spec["name"], spec["version"]
+          url = ("https://registry.modelcontextprotocol.io/v0/servers?search="
+                 + urllib.parse.quote(name))
+          with urllib.request.urlopen(url, timeout=20) as r:
+              servers = json.load(r).get("servers") or []
+          present = False
+          for entry in servers:
+              inner = entry.get("server", entry)
+              if inner.get("name") == name and inner.get("version") == want:
+                  present = True
+                  break
+          print(f"already={'true' if present else 'false'}")
+          print(f"{name}@{want} already in registry: {present}", file=sys.stderr)
+          PY
+
       - name: Log in with GitHub OIDC
+        if: steps.check.outputs.already != 'true'
         run: ./mcp-publisher login github-oidc
 
       - name: Publish
+        if: steps.check.outputs.already != 'true'
         run: ./mcp-publisher publish
+
+      - name: Note the skip
+        if: steps.check.outputs.already == 'true'
+        run: echo "::notice::${{ 'already published — nothing to do' }}"
 
       - name: Show what the registry now holds
         # Reading the entry back is the only proof that the publish landed.
