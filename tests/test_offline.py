@@ -54,15 +54,20 @@ except Exception as exc:
 if tools:
     expected = {"effects", "clip_attrs", "export_frame", "folder_ops",
                 "photo_albums", "node_graph", "project_extras",
-                "camera_comparison", "clip_position"}
+                "camera_comparison", "clip_position", "thumbnails",
+                "auto_color", "cdl", "jobs", "clone_media",
+                "resolve_ext_status"}
     missing = expected - set(tools)
-    check(f"{len(tools)} Tools registriert", len(tools) >= 9, str(sorted(tools)))
+    extra = set(tools) - expected
+    check(f"{len(tools)} Tools registriert (erwartet {len(expected)})",
+          len(tools) == len(expected), str(sorted(tools)))
     check("alle erwarteten Tools vorhanden", not missing, f"fehlen: {sorted(missing)}")
+    check("keine unerwarteten Tools", not extra, f"unerwartet: {sorted(extra)}")
 else:
     # Fallback: die Dekoratoren im Quelltext zaehlen
     src = open(os.path.join(ROOT, "server.py"), encoding="utf-8").read()
     n = src.count("@mcp.tool()")
-    check(f"{n} @mcp.tool-Dekoratoren im Quelltext", n >= 9, str(n))
+    check(f"{n} @mcp.tool-Dekoratoren im Quelltext", n == 15, str(n))
 
 print("\n=== 4. CLI ===")
 import io

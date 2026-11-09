@@ -11,33 +11,35 @@ See [README.md](README.md) for the human-facing documentation.
 other Resolve MCP servers do not implement. It is a **companion**, not a
 replacement: it runs alongside the others without overlap.
 
-Ten tools, one entry point, pure Python. No compiled parts.
+Fifteen tools, one entry point, pure Python. No compiled parts.
 
-### The Resolve MCP landscape — three servers, no overlap
+### The Resolve MCP landscape — four servers, no overlap
 
-Before installing anything, understand that Resolve is covered by three
+Before installing anything, understand that Resolve is covered by four
 independent servers that do different jobs. A user who wants **full coverage
-needs all three**; installing one and finding a capability missing is the usual
+needs all four**; installing one and finding a capability missing is the usual
 disappointment.
 
 | Server | Where it comes from | Tools | What it is for |
 |---|---|---|---|
 | **Blackmagic's own** (`ResolveMCP.exe`) | **Ships with DaVinci Resolve 21** — nothing to download | 14 | A *meta-server*: it hands the agent Resolve's scripting-API stubs and a Python sandbox (`run_script`, `search_scripting_api`, `get_whats_new`), plus LUT/DCTL management. It writes no Resolve actions itself. |
-| **community** (`samuelgursky/davinci-resolve-mcp`) | npm or git | 37 (390 with `--full`) | The workhorse: granular tools for editing, media pool, render, markers, grading, Fusion. Plus a second `davinci-resolve-advanced` server (18 Node tools) for source-safe media analysis. |
-| **this project** (`resolve-ext`) | pip | 10 | The gaps the other two leave: clip effects and their properties, Paste Attributes, frame export, photo albums, node-graph labelling, and the multi-camera comparison layouts. |
+| **community** (`samuelgursky/davinci-resolve-mcp`) | npm or git | 36 (349 with `--full`) | The workhorse: editing, media pool, render, markers, grading, Fusion — related operations grouped behind action parameters. The `--full` variant is the same API surface, one tool per method; it costs context, not capability. |
+| **community, advanced** (`davinci-resolve-advanced-mcp`) | same package, Node | 18 | **Beyond the scripting API.** Reads and edits Resolve *files* — `.drp`/`.drt`/`.drx` and the project's SQLite `Project.db` — **with no Resolve running**. Offline grade/QC catalog, conform/relink QC, node-graph relayout, provenance. The optional deps `better-sqlite3`, `sharp`, `js-yaml`, `pg` are what unlock `project_read`, `conform.verify` and `pipeline`; install with `--include=optional`. |
+| **this project** (`resolve-ext`) | pip | 15 | The gaps the other three leave: clip effects and their properties, Paste Attributes, frame export and thumbnail grids, auto colour, ASC CDL, photo albums, J-cut/L-cut audio offsets, camera-comparison layouts, job status, the media Clone Tool. |
 
-They coexist. All three talk to the same Resolve through the same scripting API,
-which is **single-client** — so register them together, but know they share one
-Resolve.
+They coexist. The live servers talk to the same Resolve through the same
+scripting API, which is **single-client** — so register them together, but know
+they share one Resolve. The advanced server talks to Resolve's *files* instead,
+so it works even when Resolve is closed.
 
 Do not install one and present it as the whole picture. If the user asks for
-"the Resolve MCP", ask which of these they mean, or install all three.
+"the Resolve MCP", ask which of these they mean, or install all four.
 
 ---
 
-## Full setup — install all three
+## Full setup — install all four
 
-Do these in order. Steps 1 and 2 are independent; step 3 assumes step 2 exists,
+Do these in order. Steps 1 and 2 are independent; step 4 assumes step 2 exists,
 because `resolve-ext` is a companion.
 
 ### Server 1 — Blackmagic's own: nothing to install
@@ -123,22 +125,54 @@ Note the installer's own warning: a Python newer than 3.12 may fail to connect
 (`scriptapp("Resolve")` returns `None`). If that happens, install Python 3.10–3.12
 and re-run against it.
 
-### Server 3 — this project
+### Server 3 — the community server's advanced sibling (offline file access)
+
+This is the one server that does **not** talk to Resolve. It reads and edits
+Resolve's files directly — `.drp` / `.drt` / `.drx` projects and the SQLite
+`Project.db` — so it works with Resolve closed, and it is the only way to
+inspect a project without opening it. 18 Node tools.
+
+```bash
+git clone https://github.com/samuelgursky/davinci-resolve-mcp.git
+cd davinci-resolve-mcp
+
+# The four dependencies that matter are OPTIONAL deps — a plain `npm install`
+# skips them and project_read / conform.verify / pipeline then refuse to run.
+npm install --prefix resolve-advanced --include=optional
+
+# Register it (this project's own doctor prints the exact block for this machine):
+resolve-ext doctor
+# or by hand:
+#   command: node
+#   args:    <checkout>/bin/davinci-resolve-advanced-mcp.mjs
+```
+
+Needs only Node ≥18 — no Python, no Resolve, no scripting-API environment
+variables. Because it never touches the scripting API, it does not compete for
+the single client slot the other three share.
+
+**Tool-call shape:** `{"action": "<name>", "args": {…}}` — the action name goes
+in `action`, its parameters in `args`. A flat argument object fails validation.
+The action list lives in each tool's *description*, not its schema (which is
+generically `{action, args}`), so read the description before the first call.
+
+### Server 4 — this project
 
 See **Install — the whole procedure** below. Short version:
 
 ```bash
-pip install https://github.com/CaptRauti/ResolveMCP-ext/releases/download/v1.0.0/resolve_ext-1.0.0-py3-none-any.whl
+pip install https://github.com/CaptRauti/ResolveMCP-ext/releases/download/v1.0.4/resolve_ext-1.0.4-py3-none-any.whl
 resolve-ext doctor        # exit 0 before you register it
 ```
 
-### Finally — check all three are live
+### Finally — check all four are live
 
 Reload the client's MCP connections, then confirm the tools from each are
-present. The three name-spaces are distinguishable at a glance:
+present. The four name-spaces are distinguishable at a glance:
 
 - from this project — `resolve_ext_status`, `camera_comparison`, `node_graph`, …
 - from the community server — `timeline`, `media_pool`, `project`, …
+- from the advanced server — `project_read`, `drp`, `drx`, `conform`, …
 - from Blackmagic — `run_script`, `search_scripting_api`, `get_whats_new`, …
 
 If a whole group is missing, that server is not registered — not a bug in the
@@ -172,7 +206,7 @@ without a build step.
 
 ```bash
 # The version in the filename must match the release tag.
-pip install https://github.com/CaptRauti/ResolveMCP-ext/releases/download/v1.0.0/resolve_ext-1.0.0-py3-none-any.whl
+pip install https://github.com/CaptRauti/ResolveMCP-ext/releases/download/v1.0.4/resolve_ext-1.0.4-py3-none-any.whl
 ```
 
 Or from git:
@@ -190,7 +224,7 @@ install into the system Python (PEP 668, "externally-managed-environment"),
 install into the interpreter the MCP client will use, or use `pipx`:
 
 ```bash
-pipx install https://github.com/CaptRauti/ResolveMCP-ext/releases/download/v1.0.0/resolve_ext-1.0.0-py3-none-any.whl
+pipx install https://github.com/CaptRauti/ResolveMCP-ext/releases/download/v1.0.4/resolve_ext-1.0.4-py3-none-any.whl
 ```
 
 ### Step 2 — Verify, and believe only the exit code
@@ -271,7 +305,7 @@ If fewer appear, the registration is wrong — not the server. Re-run
 | Blackmagic server: no tools at all in the client | `%ProgramFiles%` was assumed, but Resolve is on another drive | Resolve the real path via `HKCR\ResolveDrpFile\shell\open\command`, or set `RESOLVE_MCP_PATH` |
 | Community server: connects but `scriptapp("Resolve")` returns `None` | Python newer than 3.12 | Install Python 3.10–3.12 and re-run `install.py` with `--python` |
 | Community `install.py` never returns | It is prompting | Never call it bare; use `--clients manual` or `--dry-run` |
-| Only some of the three servers' tools are present | That is normal until all three are registered | They are separate servers; see "Full setup" |
+| Only some of the four servers' tools are present | That is normal until all four are registered | They are separate servers; see "Full setup" |
 
 Resolve's scripting API is **single-client**: only one instance of Resolve can
 serve it at a time. Two MCP servers can both be registered, but they talk to
@@ -305,7 +339,7 @@ python tests/test_camera.py   # camera layouts, labels, sorting
 ### Layout
 
 - `server.py` — the entire server: platform detection, the `doctor` and `env`
-  commands, and all ten tools. One file on purpose; it is a companion server,
+  commands, and all fifteen tools. One file on purpose; it is a companion server,
   not a framework.
 - `tests/` — the suites above.
 - `README.md` — install, tool reference, and the measured API behaviour.

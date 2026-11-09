@@ -112,7 +112,7 @@ a Studio feature — the free build refuses it).
 Download the wheel from the [releases page][releases] and install it:
 
 ```bash
-pip install resolve_ext-1.0.0-py3-none-any.whl
+pip install resolve_ext-1.0.4-py3-none-any.whl
 ```
 
 The wheel is pure Python and platform-independent — the same file works on
@@ -593,7 +593,7 @@ python tests/test_offline.py
 ```
 
 Checks that `server.py` imports **without** Resolve present (so `pip install`
-followed by `resolve-ext --help` cannot fail), that all ten tools register,
+followed by `resolve-ext --help` cannot fail), that all fifteen tools register,
 that the CLI returns the right exit codes, and that the platform path
 resolution produces the correct paths for the OS it finds itself on. Runs on
 Windows, macOS and Linux — see `.github/workflows/test.yml`.
