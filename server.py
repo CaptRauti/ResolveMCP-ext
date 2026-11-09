@@ -21,7 +21,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional
 
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 
 # --- locating DaVinci Resolve --------------------------------------------
 #
@@ -946,40 +946,56 @@ def resolve_ext_status() -> Dict[str, Any]:
 
 @mcp.tool()
 def clip_position(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Inspect clip placement, handle offsets, gaps and timeline enable state.
+    """Inspect and change clip placement, handle offsets and linked audio.
 
-    **SetPosition / MoveItems are BROKEN on Resolve 21.1.2.10** — measured to
-    return False for every input (real clips and stills, int and float
-    startFrame, even a no-op), while other write APIs work in the same
-    session. `set` and `move` therefore report an honest error rather than
-    pretending to have moved anything. Use `get` to plan, and reposition in
-    the Edit page by hand.
+    Every write below was re-measured on **DaVinci Resolve Studio 21.2.0.6**.
+    An earlier release recorded SetPosition / MoveItems as returning False for
+    every input and SetLeftOffset as destructive; both readings were withdrawn.
+    The destructive result came from a timeline whose StartFrame/EndFrame
+    contradicted its contents (duration 0 while still holding clips) — see
+    issue #336 upstream. On a timeline with consistent metadata all three work.
 
-    Actions that DO work:
+    Actions:
       get(item_id?|name?, track_type?, track_index?) -> {position, left_offset,
                                                          right_offset, start, end}
         — where an item sits and how many frames of handle it offers. This is
           the read you need before deciding a trim. READ-ONLY, safe.
+      set(start_frame?|new_track_index?, move_linked?) -> {position}
+        — TimelineItem.SetPosition. Measured: a clip at 86400 moved to 86800,
+          confirmed by GetPosition and GetStart.
+      move(items=[{item_id|name, track_index?, start_frame?}], move_linked?)
+        -> {results}
+        — one or more items in a single call, each with its own readback.
+      set_offset(left?|right?, update_linked_items?) -> {before, after}
+        — TimelineItem.SetLeftOffset / SetRightOffset set the HEAD or TAIL trim
+          of the clip, in frames: `left=n` makes the clip begin n frames into
+          its source. Measured on a clip at 86400 with source range 0–71:
+          left=5 gave start 86405, source_start 5, duration 67. So a POSITIVE
+          left offset TRIMS the head and the start moves LATER; a negative one
+          extends into the head handle and returns False when no handle is left
+          (source_start cannot go below 0 — measured). `right` behaves
+          symmetrically at the tail. Both readbacks are returned so the effect
+          is always visible, and the call is reversed by setting the offset
+          back to the previous value.
+      j_l_cut(offset_frames, item_id?|name?, …) -> {…}
+        — the J-cut / L-cut primitive: shift ONLY the audio of a linked clip
+          relative to its picture, using Timeline.MoveItems with
+          moveLinkedItems=False. The pair stays linked and the offset persists.
+          Negative offset_frames starts the audio earlier than the picture
+          (J-cut — the next sound leads the image); positive starts it later
+          (L-cut — the sound outlasts the image). The default for interviews,
+          docs and weddings. Needs a clip whose audio is on the timeline:
+          appending with mediaType=1 puts VIDEO ONLY on the timeline and leaves
+          nothing to offset, so append without mediaType to bring the audio.
       enabled() -> {enabled}
         — read the timeline's enabled state. Setting it (enabled=true/false)
           works but turns the timeline non-current, so later calls report
           'No current timeline' until it is switched back in the GUI.
-
-    Actions DISABLED or exposing a broken API on this build:
-      set(start_frame?|new_track_index?) — SetPosition returns False for every
-        input, including no-ops.
-      move(items=[…]) — same broken call per item.
-      set_offset(left?|right?) — SetLeftOffset does NOT nudge the edit point:
-        it EXTENDS the clip from source media. Measured: a clip at frame 400
-        with duration 120 became start=-85995, duration=86515 after
-        SetLeftOffset(5), and could not be restored by setting 0.
-      delete_gaps() — closes the gaps between clips so they sit back to back.
-        **Verified working** on a timeline whose StartFrame/EndFrame agree with
-        its contents. It appeared to be a silent no-op in an earlier release;
-        that measurement ran on a timeline whose metadata contradicted its
-        contents (StartFrame == EndFrame while holding three clips). The action
-        compares the clip starts before and after and reports the real outcome
-        either way.
+      delete_gaps() -> {items_before, items_after, starts_before, starts_after}
+        — closes the gaps between clips so they sit back to back. Verified
+          working on a timeline whose StartFrame/EndFrame agree with its
+          contents; on a contradictory timeline it honestly reports that
+          nothing moved and why.
 
     Addressing: `item_id` (GetUniqueId) or `name` on a track. Track defaults
     video/1. Frame numbers are absolute timeline frames, not timecode.
@@ -1041,19 +1057,22 @@ def clip_position(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[
             pos["trackIndex"] = int(p["new_track_index"])
         if not pos:
             return _err("set needs start_frame and/or new_track_index.")
+        before = item.GetStart()
         ok = item.SetPosition(pos, bool(p.get("move_linked", True)))
         if not ok:
             return _err(
-                "SetPosition returned False. MEASURED on DaVinci Resolve "
-                "21.1.2.10: this call fails for EVERY input tried — real video "
-                "clips and stills, integer and float startFrame, a no-op "
-                "startFrame equal to the current one, and both moveLinkedItems "
-                "values. Timeline.MoveItems fails identically, while other "
-                "write APIs (SetCurrentTimecode) succeed in the same session. "
-                "Treat SetPosition/MoveItems as BROKEN on this build and "
-                "reposition clips in the Edit page by hand. Nothing was moved."
+                "SetPosition returned False — nothing was moved. On 21.2.0.6 "
+                "this call works (measured: 86400 -> 86800), so a False here "
+                "points at the input rather than the build: check that "
+                "start_frame is a real frame number for this timeline and that "
+                "the item really is on the track you addressed."
             )
-        return _ok(name=item.GetName(), position=item.GetPosition())
+        return _ok(
+            name=item.GetName(),
+            start_before=before,
+            position=item.GetPosition(),
+            start_after=item.GetStart(),
+        )
 
     if action == "move":
         spec = p.get("items")
@@ -1075,10 +1094,8 @@ def clip_position(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[
             if it is None:
                 return _err(f"Could not resolve item spec {s} on {track_type} track {track_index}.")
             targets.append(it)
-        # NOTE: Timeline.MoveItems is broken on 21.1.2.10 (measured: always
-        # False). This applies the per-item moves with SetPosition, which is
-        # equally broken — the honest outcome is a per-item failure report
-        # rather than a silent no-op.
+        # Both SetPosition and Timeline.MoveItems work on 21.2.0.6 (measured).
+        # Each item gets its own readback so a partial failure is visible.
         results = []
         for s, it in zip(spec, targets):
             if s.get("start_frame") is None and s.get("track_index") is None:
@@ -1089,33 +1106,176 @@ def clip_position(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[
                 pos["startFrame"] = float(s["start_frame"])
             if s.get("track_index") is not None:
                 pos["trackIndex"] = int(s["track_index"])
+            before = it.GetStart()
             ok = it.SetPosition(pos, bool(p.get("move_linked", True)))
             results.append({
                 "name": it.GetName(),
                 "success": bool(ok),
+                "start_before": before,
+                "start_after": it.GetStart() if ok else None,
                 "position": it.GetPosition() if ok else None,
             })
         if results and all(not r.get("success") for r in results if "success" in r):
             return _err(
-                "Every SetPosition call returned False. MEASURED on Resolve "
-                "21.1.2.10: SetPosition and Timeline.MoveItems are BROKEN on "
-                "this build (they fail for every input, including no-ops), "
-                "while other write APIs work. Reposition in the Edit page."
+                "Every SetPosition call returned False — nothing was moved. On "
+                "21.2.0.6 SetPosition and Timeline.MoveItems both work, so this "
+                "points at the specs rather than the build: verify the item_id "
+                "or name resolves on the track you named, and that the "
+                "start_frame values are real for this timeline."
             )
         return _ok(results=results)
 
     if action == "set_offset":
-        return _err(
-            "set_offset is DISABLED. MEASURED on Resolve 21.1.2.10: "
-            "SetLeftOffset(5) on a clip starting at frame 400 moved it to "
-            "-85995 and inflated its duration from 120 to 86515 frames — it "
-            "extends the clip using the source media, it does NOT nudge the "
-            "edit point. Setting the offset back to 0 did not restore the "
-            "original position (the clip stayed at -86000). This is "
-            "destructive and not reversible through the API, so it is not "
-            "exposed. Read offsets with action='get' (read-only is safe); "
-            "make trims with the usual Resolve edit tools."
-        )
+        item, ierr = _resolve()
+        if ierr:
+            return ierr
+        left, right = p.get("left"), p.get("right")
+        if left is None and right is None:
+            return _err("set_offset needs left and/or right (frame counts, float ok).")
+        upd = bool(p.get("update_linked_items", True))
+
+        def _snap(it):
+            try:
+                return {
+                    "start": it.GetStart(),
+                    "end": it.GetEnd(),
+                    "duration": it.GetDuration(),
+                    "left_offset": it.GetLeftOffset(),
+                    "right_offset": it.GetRightOffset(),
+                    "source_start": it.GetSourceStartFrame(),
+                    "source_end": it.GetSourceEndFrame(),
+                }
+            except Exception as exc:
+                return {"error": str(exc)}
+
+        before = _snap(item)
+        applied: Dict[str, bool] = {}
+        if left is not None:
+            applied["left"] = bool(item.SetLeftOffset(float(left), False, upd))
+        if right is not None:
+            applied["right"] = bool(item.SetRightOffset(float(right), False, upd))
+        after = _snap(item)
+
+        if not any(applied.values()):
+            return _err(
+                f"SetLeftOffset/SetRightOffset returned False for every value "
+                f"given ({applied}); nothing changed. Readback: {before}."
+            )
+        result: Dict[str, Any] = {
+            "name": item.GetName(),
+            "applied": applied,
+            "before": before,
+            "after": after,
+            "changed": before != after,
+        }
+        if not result["changed"]:
+            result["note"] = ("Reported success but the readback is unchanged — "
+                              "treat this as a no-op and check the values.")
+        elif (before.get("start") is not None and after.get("start") is not None
+                and after["start"] > before["start"]):
+            result["note"] = (
+                "The start moved LATER: a positive left offset trims the head, "
+                "so the clip now begins that many frames further into its "
+                "source. Pass the previous offset value to reverse it (0 if it "
+                "was untrimmed) — a negative value extends into the head handle "
+                "and returns False when no handle is left."
+            )
+        return _ok(**result)
+
+    if action == "j_l_cut":
+        item, ierr = _resolve()
+        if ierr:
+            return ierr
+        off = p.get("offset_frames")
+        if off is None:
+            return _err(
+                "j_l_cut needs offset_frames. Negative starts the audio EARLIER "
+                "than the picture (J-cut — the sound leads the image); positive "
+                "starts it LATER (L-cut — the sound outlasts the image)."
+            )
+        off = float(off)
+        if off == 0:
+            return _err("offset_frames must be non-zero; 0 would change nothing.")
+
+        try:
+            linked = item.GetLinkedItems() or []
+        except Exception as exc:
+            return _err(f"GetLinkedItems raised: {exc}")
+
+        audio = None
+        for cand in linked:
+            try:
+                ttype, _tidx = cand.GetTrackTypeAndIndex()
+            except Exception:
+                ttype = None
+            if ttype == "audio":
+                audio = cand
+                break
+        if audio is None:
+            return _err(
+                f"No linked audio item for '{item.GetName()}', so there is "
+                f"nothing to offset (GetLinkedItems returned {len(linked)} "
+                "item(s)). A video-only clip has no audio to lead or lag. If the "
+                "clip is already unlinked, move the audio item directly with "
+                "action='move'."
+            )
+
+        def _start(it):
+            try:
+                return (it.GetPosition() or {}).get("startFrame")
+            except Exception:
+                return None
+
+        v_start, a_start = _start(item), _start(audio)
+        if a_start is None:
+            return _err("Could not read the audio item's startFrame; nothing changed.")
+
+        # moveLinkedItems=False is what holds the picture still — no unlinking
+        # needed. Measured: MoveItems with that flag moves the audio alone, and
+        # the pair stays linked with the offset intact. Unlinking first is not
+        # merely unnecessary but a trap: SetClipsLinked([videoItem], True)
+        # reports True and silently FAILS to rejoin — it needs BOTH items.
+        target = float(a_start) + off
+        try:
+            tl_start = tl.GetStartFrame()
+        except Exception:
+            tl_start = None
+        if tl_start is not None and target < tl_start:
+            return _err(
+                f"A J-cut here would put the audio at {target}, but the timeline "
+                f"starts at {tl_start} — Resolve will not place a clip before the "
+                "start of the timeline (measured). A J-cut needs a PREDECESSOR to "
+                "overlap with: apply it to a clip that already has one, or give "
+                "the timeline headroom first. Nothing was moved."
+            )
+        if not tl.MoveItems([audio], {"startFrame": target}, False):
+            return _err(
+                f"Timeline.MoveItems returned False moving the audio from "
+                f"{a_start} to {target}; nothing was moved. On 21.2.0.6 this "
+                "happens when the target falls outside the timeline's bounds."
+            )
+
+        a_after = _start(audio)
+        moved_by = None if a_after is None else float(a_after) - float(a_start)
+        result: Dict[str, Any] = {
+            "name": item.GetName(),
+            "kind": ("J-cut — the audio now leads the picture" if off < 0
+                     else "L-cut — the audio now outlasts the picture"),
+            "offset_requested": off,
+            "offset_applied": moved_by,
+            "video_start": v_start,
+            "audio_start_before": a_start,
+            "audio_start_after": a_after,
+            "note": ("The pair stays linked: the offset persists, and a later "
+                     "move of the picture (move_linked=true) carries the audio "
+                     "along while keeping this offset."),
+        }
+        if moved_by is not None and abs(moved_by - off) > 0.001:
+            result["warning"] = (
+                f"Requested {off} but the audio moved by {moved_by} — Resolve "
+                "clamped it, most likely to the media bounds."
+            )
+        return _ok(**result)
 
     if action == "delete_gaps":
         if tl is None:
@@ -1174,7 +1334,7 @@ def clip_position(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[
 
     return _err(
         f"Unknown action '{action}'. Use get, set, move, set_offset, "
-        "delete_gaps or enabled."
+        "j_l_cut, delete_gaps or enabled."
     )
 
 

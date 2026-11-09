@@ -4,6 +4,48 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4] — 2026-11-09
+
+### Added
+
+- **`clip_position` → `j_l_cut`** — the J-cut / L-cut primitive, and the reason
+  this tool grew. It shifts ONLY the audio of a linked clip relative to its
+  picture, via `Timeline.MoveItems(..., moveLinkedItems=False)`, so the picture
+  stays put and the pair stays linked with the offset intact. Negative
+  `offset_frames` starts the audio earlier (J-cut — the sound leads the image),
+  positive starts it later (L-cut — the sound outlasts it). Verified: an L-cut of
+  +24 moved the audio 86400 → 86424; a real J-cut of −12 on a clip with a
+  predecessor moved its audio 86496 → 86484, with Resolve trimming the
+  predecessor's audio tail to make room — exactly what a J-cut does in the NLE.
+- **`clip_position` → `set_offset`** now works, and covers `SetRightOffset` —
+  which neither this project nor the mainstream server exposed. It sets the head
+  or tail TRIM (`left=n` begins the clip `n` frames into its source). Measured on
+  a clip at 86400 with source 0–71: `left=5` → start 86405 / source_start 5 /
+  duration 67, and `left=0` restored it exactly. Fully reversible.
+- **`clip_position` → `set` / `move`** move clips again and return before/after
+  readbacks.
+
+### Fixed
+
+- **Three of this project's own claims were wrong and are withdrawn.**
+  `SetPosition`, `Timeline.MoveItems` and `SetLeftOffset` were documented as
+  broken or destructive, and `set_offset` was disabled outright with a lecture
+  about a bug that does not exist. All three work on 21.2.0.6. The destructive
+  reading came from a timeline whose `StartFrame == EndFrame` (duration 0) while
+  still holding clips — the `AppendToTimeline` trap already documented below. The
+  tool was refusing to do things that work; reported upstream as issue #336.
+
+### Notes
+
+- Two traps `j_l_cut` now names in its error messages instead of leaving the
+  caller to guess: a clip appended with `mediaType=1` lands as **video only**
+  (nothing to offset — append without `mediaType`), and a J-cut needs a
+  **predecessor**, because Resolve refuses to place a clip before the timeline's
+  `StartFrame`.
+- `Timeline.SetClipsLinked([videoItem], True)` returns `True` and **silently
+  fails** to rejoin a pair — it needs both items. `j_l_cut` therefore never
+  unlinks; `moveLinkedItems=False` is what holds the picture still.
+
 ## [1.0.3] — 2026-11-08
 
 ### Added

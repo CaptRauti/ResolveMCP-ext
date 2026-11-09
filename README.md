@@ -27,7 +27,7 @@ project_extras       render presets, audio render formats, transcription
 jobs                 status of the non-blocking analysis/render jobs (21.1)
 clone_media          MediaStorage Clone Tool: copy a media tree (21.1)
 camera_comparison    2x2 / split layouts, camera labels, markers
-clip_position        read placement + handle offsets; flags broken APIs
+clip_position        move/trim clips, J-cut / L-cut (audio offset)
 resolve_ext_status   health check
 ```
 
@@ -485,18 +485,48 @@ Verified: on a 3840x2160 timeline `grid_2x2` puts AcePro at `Pan -960, Tilt
 ### `clip_position`
 
 ```
-get(item_id?|name?)      position + left/right handle offsets   (safe, read-only)
-enabled()                timeline enabled state
+get(item_id?|name?)                                 position + handle offsets (read-only)
+set(start_frame?|new_track_index?, move_linked?)    move the clip
+move(items=[…], move_linked?)                       move several in one call
+set_offset(left?|right?, update_linked_items?)      head/tail trim, with readback
+j_l_cut(offset_frames, …)                           J-cut / L-cut: shift only the audio
+delete_gaps()                                       close the gaps between clips
+enabled()                                           timeline enabled state
 ```
 
-`set` / `move` / `set_offset` / `delete_gaps` exist in the code but are
-**disabled and transparent about why** — they wrap Resolve calls that are broken
-or destructive on 21.1.2. See the next section.
+`set_offset` sets the **trim** at an edit point: `left=n` makes the clip begin
+`n` frames into its source. Measured on a clip at 86400 with source range 0–71:
+`left=5` gave start 86405 / source_start 5 / duration 67, and `left=0` restored
+it exactly — it is fully reversible. A negative value extends into the head
+handle and returns `False` when no handle is left.
 
-## Measured behaviour on Resolve 21.1.2.10
+`j_l_cut` is the J-cut / L-cut primitive, and the reason this tool grew.
+`offset_frames` negative starts the audio earlier than its picture (J-cut — the
+next sound leads the image); positive starts it later (L-cut — the sound
+outlasts the image). It uses `Timeline.MoveItems(..., moveLinkedItems=False)`, so
+the picture does not move and the pair stays linked with the offset intact.
+Measured: an L-cut of +24 moved the audio 86400 → 86424; a real J-cut of −12 on
+a clip with a predecessor moved its audio 86496 → 86484, and Resolve trimmed the
+predecessor's audio tail to make room — exactly what a J-cut does in the NLE.
+
+Two traps it wraps up for you: a clip appended with `mediaType=1` lands as
+**video only**, so there is no audio to offset (append without `mediaType`); and
+a J-cut needs a **predecessor** — Resolve refuses to place audio before the
+timeline's `StartFrame`, and the tool says so rather than reporting a bare
+failure.
+
+## Measured behaviour on Resolve 21.2.0.6
 
 Everything below was measured against a live Studio build, not read from docs.
-`tests/` reproduces all of it — 132 assertions across four suites, 0 failures.
+`tests/` reproduces it — 132 assertions across four suites, 0 failures.
+
+**Re-measured on 21.2.0.6 and WITHDRAWN:** `TimelineItem.SetPosition`,
+`Timeline.MoveItems` and `TimelineItem.SetLeftOffset` were recorded here as
+broken or destructive on 21.1.2.10. All three work, and `SetLeftOffset` is
+reversible. The destructive reading came from a timeline whose
+`StartFrame == EndFrame` (duration 0) while still holding clips — the
+`AppendToTimeline` entry below is the real root cause. Reported upstream as
+issue #336.
 
 **Working**
 
@@ -515,10 +545,10 @@ Everything below was measured against a live Studio build, not read from docs.
 
 | Call | Measured behaviour |
 |---|---|
-| `TimelineItem.SetPosition` | Returns `False` for **every** input — real video clips and stills, int and float `startFrame`, a no-op equal to the current frame, both `moveLinkedItems` values. `Timeline.MoveItems` behaves identically, while `SetCurrentTimecode` succeeds in the same session. |
+| `TimelineItem.SetPosition` | **Works** on 21.2.0.6 — a clip at 86400 moved to 86800, confirmed by both `GetPosition` and `GetStart`; `Timeline.MoveItems` likewise (→ 87000). An earlier release recorded both as returning `False` for **every** input; that measurement ran on a timeline reporting `StartFrame == EndFrame` — see the `AppendToTimeline` entry. |
 | `Timeline.ExportFrame` | **Works** — `frameOffset` is relative to the timeline start, valid `0..duration-1`. Verified on a 480-frame timeline: 0..479 succeed, 480 is refused. An absolute frame is always refused, which reads like a failure. An earlier release listed this as broken; that was a bad measurement on a timeline whose metadata contradicted its contents. |
 | `Timeline.DeleteGaps` | **Works** — verified `[86400, 86600, 86800]` → `[86400, 86520, 86640]`, gaps closed. It does nothing on a timeline that reports `StartFrame == EndFrame` while holding clips; see the `AppendToTimeline` entry below. |
-| `TimelineItem.SetLeftOffset` | **Destructive.** On a clip at frame 400 with duration 120, `SetLeftOffset(5)` moved it to **-85995** and inflated the duration to **86515** frames: it *extends the clip from source media*, it does not nudge the edit point. Setting the offset back to `0` did **not** restore the original position (the clip stayed at -86000). There is no API-level undo. |
+| `TimelineItem.SetLeftOffset` | **Works, and is reversible** on 21.2.0.6 — it sets the HEAD trim: `left=5` on a clip at 86400 with source range 0–71 gave start 86405 / source_start 5 / duration 67, and `left=0` restored it exactly. A negative value extends into the head handle and returns `False` when no handle is left. The earlier "moved to −85995, not restorable" reading came from the same duration-0 timeline as the `SetPosition` entry. |
 | `MediaPool.AddToPhotoAlbum` | Adds nothing and returns an empty list. Tested four ways: immediately after `CreateEmptyPhotoAlbum`, with a 2 s pause, after an explicit `SetCurrentPhotoAlbum` that `GetCurrentPhotoAlbum` confirmed, and with a fresh album each time — zero photos every run. `MediaPool.CreatePhotoAlbumFromPhotos` VERIFIED working (photos land and read back), so use that. |
 | `Graph.ResetAllNodeColors` | Exists on a photo album item's graph but **not** on a timeline clip's graph (`NoneType is not callable`). Clearing a colour with `SetNodeColor(i, "")` works on both. |
 | `MediaPoolItem.GetNodeGraph` | Not callable on 21.1.2.10 (while `TimelineItem.GetNodeGraph` and `PhotoAlbumItem.GetNodeGraph` both work). Put the clip on a timeline and address it by `item_id`. |
