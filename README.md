@@ -8,8 +8,8 @@ effect properties, Paste-Attributes, frame export, thumbnail grids, automatic
 colour, ASC CDL and media-pool folder lookups.
 
 It is deliberately an **extension, not a replacement**: register it alongside
-the other two Resolve MCP servers and you get a larger surface with no overlap —
-see [the full setup](#the-full-resolve-mcp-setup--three-servers-all-of-them).
+the other three Resolve MCP servers and you get a larger surface with no overlap —
+see [the full setup](#the-full-resolve-mcp-setup--four-servers-all-of-them).
 Everything it exposes is measured against a live Resolve, and calls that turn
 out to be broken are reported as broken rather than wrapped in a success.
 
@@ -31,21 +31,23 @@ clip_position        move/trim clips, J-cut / L-cut (audio offset)
 resolve_ext_status   health check
 ```
 
-## The full Resolve MCP setup — three servers, all of them
+## The full Resolve MCP setup — four servers, all of them
 
-Resolve is not covered by one MCP server. **Three independent servers do
-different jobs, and full coverage means running all three.** This project is the
-third; the other two are not optional extras.
+Resolve is not covered by one MCP server. **Four independent servers do
+different jobs, and full coverage means running all four.** This project is one
+of them; the other three are not optional extras.
 
 | Server | Origin | Tools | What it is for |
 |---|---|---|---|
 | **Blackmagic's own**<br>`ResolveMCP.exe` | **Ships with DaVinci Resolve 21** — nothing to download | 14 | A *meta-server*: it provides Resolve's scripting-API stubs and a Python sandbox (`run_script`, `search_scripting_api`, `get_whats_new`) plus LUT/DCTL management. It performs no Resolve actions itself. |
-| **community**<br>[`samuelgursky/davinci-resolve-mcp`](https://github.com/samuelgursky/davinci-resolve-mcp) | `npx` or git | 37<br>(390 with `--full`) | The workhorse: editing, media pool, render, markers, grading, Fusion — one granular tool per task. Ships a second `davinci-resolve-advanced` server (18 Node tools) for source-safe media analysis. |
-| **this project**<br>`resolve-ext` | pip | 15 | The gaps the other two leave — see the table below. |
+| **community**<br>[`samuelgursky/davinci-resolve-mcp`](https://github.com/samuelgursky/davinci-resolve-mcp) | `npx` or git | 36<br>(349 with `--full`) | The workhorse: editing, media pool, render, markers, grading, Fusion — related operations grouped behind action parameters. The `--full` variant is the same API surface, one tool per method; it costs context, not capability. |
+| **community, advanced**<br>[`davinci-resolve-advanced-mcp`](https://github.com/samuelgursky/davinci-resolve-mcp#advanced-server--beyond-the-scripting-api-optional-node) | same package, Node | 18 | **Beyond the scripting API.** Reads and edits Resolve *files* — `.drp` / `.drt` / `.drx` and the project's SQLite `Project.db` — **with no Resolve running**. Offline grade/QC catalog, conform/relink QC, whole-project node-graph relayout, provenance. Nothing else here can do this. |
+| **this project**<br>`resolve-ext` | pip | 15 | The gaps the other three leave — see the table below. |
 
-All three talk to the same Resolve through the same **single-client** scripting
-API. They coexist without overlap; registering one and wondering why a
-capability is missing is the usual disappointment.
+The first and third servers drive the same Resolve through the same
+**single-client** scripting API. The advanced server does not talk to Resolve at
+all — it works on the files — so it runs happily alongside them, or on a machine
+where Resolve is not installed.
 
 ```bash
 # 1. Blackmagic's — already on disk, just register it:
@@ -56,14 +58,19 @@ capability is missing is the usual disappointment.
 # 2. the community server (use --clients manual when driving it non-interactively):
 npx davinci-resolve-mcp setup
 
-# 3. this project:
-pip install https://github.com/CaptRauti/ResolveMCP-ext/releases/download/v1.0.0/resolve_ext-1.0.0-py3-none-any.whl
+# 3. its advanced sibling — offline file access, needs Node and nothing else.
+#    The optional deps are what unlock project_read / conform.verify / pipeline:
+npm install --prefix <checkout>/resolve-advanced --include=optional
+#    then register:  node <checkout>/bin/davinci-resolve-advanced-mcp.mjs
+
+# 4. this project:
+pip install https://github.com/CaptRauti/ResolveMCP-ext/releases/download/v1.0.4/resolve_ext-1.0.4-py3-none-any.whl
 resolve-ext doctor
 ```
 
 Full procedure, per-platform paths, the Windows "Resolve is on another drive"
 case, and the failure modes of each: **[AGENTS.md](AGENTS.md)** — written so an
-AI agent can install all three unattended.
+AI agent can install all four unattended.
 
 ## Why this exists
 
