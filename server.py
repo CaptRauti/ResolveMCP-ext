@@ -21,7 +21,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional
 
-__version__ = "1.0.5"
+__version__ = "1.0.6"
 
 # --- locating DaVinci Resolve --------------------------------------------
 #
@@ -308,31 +308,51 @@ except ImportError:  # pragma: no cover - depends on the installed SDK
 _RESOLVE = None
 
 
+def _is_live(app) -> bool:
+    """True when `app` still answers as a Resolve handle.
+
+    The check is the RETURN VALUE, not merely the absence of an exception.
+    Resolve's proxy comes in two flavours once its process is gone:
+
+    * the documented one - every method slot is ``None``, so the call raises
+      ``TypeError: 'NoneType' object is not callable``;
+    * the quiet one - the call succeeds and returns ``None``.
+
+    Trusting "no exception" caches the second flavour forever: the server keeps
+    handing the corpse to every tool and looks broken until the process is
+    killed by hand, even though a fresh ``scriptapp()`` would work.
+    """
+    if app is None:
+        return False
+    try:
+        return bool(app.GetProductName())
+    except Exception:
+        return False
+
+
 def _connect():
     """Return the Resolve app object, or None. Cached, but validated.
 
     Resolve hands out a proxy that dies with the Resolve process: after a
-    Resolve restart, every call on a handle cached from the previous instance
-    raises ``'NoneType' object is not callable`` and the server looks broken
-    until it is restarted. So the cache is checked with a cheap call before it
-    is trusted and dropped when it is stale, which makes the server self-heal
-    across a Resolve restart.
+    Resolve restart, calls on a handle cached from the previous instance either
+    raise ``'NoneType' object is not callable`` or quietly return ``None``. The
+    cache is therefore re-validated with a cheap call before it is trusted and
+    dropped when it is stale, which makes the server self-heal across a Resolve
+    restart instead of needing a manual process kill.
     """
     global _RESOLVE
     if _RESOLVE is not None:
-        try:
-            _RESOLVE.GetProductName()
+        if _is_live(_RESOLVE):
             return _RESOLVE
-        except Exception:
-            _RESOLVE = None
+        _RESOLVE = None
     try:
         import DaVinciResolveScript as dvr
 
         app = dvr.scriptapp("Resolve")
-        if app:
-            _RESOLVE = app
+        # Connected but mute, or not connected at all: do not cache either.
+        _RESOLVE = app if _is_live(app) else None
     except Exception:
-        pass
+        _RESOLVE = None
     return _RESOLVE
 
 

@@ -222,7 +222,57 @@ finally:
     _child.kill()
 
 
-print("\n=== 10. Alle Quelldateien parsen ===")
+print("\n=== 10. Stale-Handle-Erkennung (kein Resolve noetig) ===")
+# Resolve's proxy does not survive its process: calls on a cached handle either
+# raise "'NoneType' object is not callable" or quietly return None. Trusting
+# "no exception" cached the quiet flavour forever, so the server looked broken
+# until the process was killed by hand - even though a fresh scriptapp() would
+# have worked. Both flavours must be dropped.
+class _QuietDead:
+    """Stale proxy: the call succeeds and returns None."""
+    def GetProductName(self):
+        return None
+
+
+class _RaisingDead:
+    """Stale proxy, documented shape: the method slot itself is gone."""
+    GetProductName = None
+
+
+class _Live:
+    def GetProductName(self):
+        return "DaVinci Resolve Studio"
+
+
+check("_is_live(None) ist False", server._is_live(None) is False)
+check("_is_live(stiller toter Proxy) ist False",
+      server._is_live(_QuietDead()) is False)
+check("_is_live(werfender toter Proxy) ist False",
+      server._is_live(_RaisingDead()) is False)
+check("_is_live(lebender Proxy) ist True", server._is_live(_Live()) is True)
+check("_is_live(Objekt ohne GetProductName) ist False",
+      server._is_live(object()) is False)
+
+_saved = server._RESOLVE
+try:
+    for _label, _corpse in (("still", _QuietDead()), ("werfend", _RaisingDead())):
+        server._RESOLVE = _corpse
+        _got = server._connect()
+        check(f"toter Proxy ({_label}) wird nicht zurueckgegeben",
+              not isinstance(_got, type(_corpse)))
+        check(f"toter Proxy ({_label}) wird nicht gecacht",
+              not isinstance(server._RESOLVE, type(_corpse)))
+
+    _lv = _Live()
+    server._RESOLVE = _lv
+    check("lebender Proxy wird behalten", server._connect() is _lv)
+    check("Cache endet nie mit einer Leiche",
+          server._RESOLVE is None or server._is_live(server._RESOLVE))
+finally:
+    server._RESOLVE = _saved
+
+
+print("\n=== 11. Alle Quelldateien parsen ===")
 for base, _dirs, files in os.walk(ROOT):
     if ".git" in base or "__pycache__" in base:
         continue

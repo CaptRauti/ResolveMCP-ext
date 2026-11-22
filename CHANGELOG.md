@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.6] — 2026-11-22
+
+### Fixed
+
+- **A cached Resolve handle that answers `None` is now dropped, not served.**
+  Resolve's proxy dies with its process in two shapes, and only one of them
+  raises. The documented shape leaves every method slot as `None`, so a call
+  raises `TypeError: 'NoneType' object is not callable`. The quiet shape — seen
+  after a restart — succeeds and returns `None`. v1.0.3 validated the cache by
+  *calling* a method and treating "no exception" as "alive", which cached the
+  quiet corpse forever: every tool then answered with a `None`-derived failure
+  until the process was killed by hand, even though a fresh `scriptapp()` would
+  have connected. The check is now the **return value**: `_is_live(app)` requires
+  a truthy `GetProductName()`, and `_connect()` refuses to cache a handle that
+  fails it — both for the cache read and for a fresh connection, since a
+  connected-but-mute app is no more usable than an absent one.
+
+  Covered offline in `tests/test_offline.py` §10 against three stand-in proxies
+  (quiet-dead, raising-dead, live). Mutation-checked: restoring the old
+  "no exception means alive" logic fails exactly the two quiet-dead assertions
+  (`nicht zurueckgegeben`, `nicht gecacht`) and nothing else. Not verified
+  against a live Resolve restart — the run that shipped this had no Resolve
+  instance; the live evidence for the quiet shape is the session finding behind
+  the v1.0.3 note.
+
 ## [1.0.5] — 2026-11-09
 
 ### Fixed
