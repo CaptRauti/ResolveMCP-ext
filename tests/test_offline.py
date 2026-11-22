@@ -64,6 +64,23 @@ if tools:
           len(tools) == len(expected), str(sorted(tools)))
     check("alle erwarteten Tools vorhanden", not missing, f"fehlen: {sorted(missing)}")
     check("keine unerwarteten Tools", not extra, f"unerwartet: {sorted(extra)}")
+    # Call-shape parity: every tool must survive the generic
+    # fn(action=..., params=...) call. resolve_ext_status was declared `()` and
+    # blew up with TypeError on exactly that path (Paperclip RAU-154,
+    # fixed in v1.1.1) — a defect no direct-call test can see.
+    import inspect
+    _bad = []
+    for _name in sorted(expected):
+        _fn = getattr(server, _name, None)
+        if _fn is None:
+            _bad.append(f"{_name}: missing")
+            continue
+        try:
+            inspect.signature(_fn).bind(action=None, params={})
+        except TypeError as _exc:
+            _bad.append(f"{_name}: {_exc}")
+    check("jedes Tool akzeptiert fn(action=..., params=...)", not _bad,
+          "; ".join(_bad))
 else:
     # Fallback: die Dekoratoren im Quelltext zaehlen
     src = open(os.path.join(ROOT, "server.py"), encoding="utf-8").read()

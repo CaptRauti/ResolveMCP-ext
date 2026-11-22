@@ -21,7 +21,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 # --- locating DaVinci Resolve --------------------------------------------
 #
@@ -962,13 +962,23 @@ def clip_attrs(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str
 
 
 @mcp.tool()
-def resolve_ext_status() -> Dict[str, Any]:
+def resolve_ext_status(action: Optional[str] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Health check for the resolve-ext server and its Resolve connection.
 
     Reports whether Resolve is reachable, which product/version is live,
     whether a project is open, and which of this server's surfaces are
     usable on that build.
+
+    Takes `action`/`params` like every other tool in this package, purely so a
+    generic caller can drive it the same way. Both are optional and ignored:
+    `resolve_ext_status()` and `resolve_ext_status("status", {})` do the same
+    thing. MEASURED 22.11.2026: before v1.1.1 the tool was declared `()` and a
+    caller following the house pattern died with
+    `TypeError: resolve_ext_status() got an unexpected keyword argument
+    'action'` (reported on Paperclip RAU-154) — an inconsistency in the
+    signature, not a defect in the check.
     """
+    _ = (action, params)  # accepted for call-shape parity, deliberately unused
     app = _connect()
     if not app:
         return _err(

@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] — 2026-11-22
+
+### Fixed
+
+- **`resolve_ext_status` now takes `action`/`params` like every other tool.**
+  It was declared `resolve_ext_status()` while the other 18 tools carry the
+  `(action, params)` house shape, so a caller that drives tools generically died
+  with `TypeError: resolve_ext_status() got an unexpected keyword argument
+  'action'`. Both parameters are optional and ignored; `resolve_ext_status()`,
+  `resolve_ext_status("status", {})` and `resolve_ext_status(action=None,
+  params={...})` return the identical dict (measured on 21.2.0.6). Nothing that
+  worked before stops working. Reported on Paperclip [RAU-154] by the agent
+  that hit it during a verification run, which is exactly the kind of
+  inconsistency a green offline suite cannot catch: the tests call the function
+  directly, not through the generic path.
+
 ## [1.1.0] — 2026-11-22
 
 Four tools for the last gaps against the 21.2 type stub. Every one of them
