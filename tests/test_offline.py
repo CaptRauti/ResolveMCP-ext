@@ -172,7 +172,13 @@ import subprocess
 _child = subprocess.Popen(
     [sys.executable, os.path.join(ROOT, "server.py")],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-    text=True, bufsize=1, cwd=ROOT)
+    text=True, encoding="utf-8", errors="replace", bufsize=1, cwd=ROOT)
+# text=True alone takes the platform default, which is cp1252 on Windows: the
+# tool descriptions carry non-ASCII characters (an em dash, arrows), and the
+# reader then dies with UnicodeDecodeError('charmap') while Linux and macOS
+# pass. Pin UTF-8 in BOTH directions so the handshake tests the protocol and
+# not the console codepage. Reproduced in CI on windows-latest/py3.12 and 3.10,
+# 22.11.2026; the fix is the encoding argument, not a change to the docs.
 
 
 def _rpc(obj, want_id):
