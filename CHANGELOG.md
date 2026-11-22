@@ -4,6 +4,48 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-11-22
+
+Four tools for the last gaps against the 21.2 type stub. Every one of them
+measured live on Resolve Studio 21.2.0.6 (Windows) by calling it and reading
+the result back — including the failures, which are reported as failures.
+
+### Added
+
+- **`project_presets`** — the project-settings preset lifecycle
+  (`SaveCurrentProjectSettingsAsNewPreset`, `UpdateProjectSettingsPreset`,
+  `SetProjectSettingsPreset`, `DeleteProjectSettingsPreset`). The mainstream
+  server could only list them. Save/apply/update/delete round-tripped against
+  the real list. **Defaults to dry run**, because upstream issue #207 documents
+  this exact sequence destroying a never-saved project's `Sm2MultiSysData`
+  table while every call returned `True`. Measured here: `pf.SaveProject` is
+  not callable on 21.2 (SaveProject lives on **ProjectManager**), so the
+  "save first" advice is applied through `pm.SaveProject` instead.
+- **`multicam`** — `info` and `smart_switch`. Two findings that a stub cannot
+  tell you: `PerformMulticamSmartSwitch` is on the **TimelineItem**, not on the
+  Timeline (Timeline: not callable, Item: answers), and a multicam item is
+  identified **only by its name** (`<clip> - Angle 1`) — there is no
+  `GetIsMulticamClip` on this build. A single-angle multicam clip answers
+  `False`; that is the API, not the tool.
+- **`render_preset_admin`** — `list` and `create` (`SaveAsNewRenderPreset`),
+  verified by re-listing the presets (37 factory presets before, 38 with the
+  new one, back to 37 after `DeleteRenderPreset`). `DeleteRenderPreset` exists
+  even though `ViewRenderPresetList`-style neighbours do not appear in the stub;
+  the tool uses it for cleanup and reports when it is absent.
+- **`keyboard_presets`** — `list`, `current`, `load`, `export`, `import_file`,
+  `delete`. Only the first three work on 21.2.0.6: loading 'Adobe Premiere Pro'
+  changed the current preset and stayed changed; `ExportKeyboardPreset` and
+  `ImportKeyboardPreset` returned `False` for every path and extension tried,
+  including a byte-for-byte copy of Resolve's own `keyboard.preset.xml`, and
+  `DeleteKeyboardPreset` answered `False` with the list unchanged. Each action
+  carries `supported`, so "this build cannot" never reads as "I used it wrong".
+
+### Not a gap (checked, not built)
+
+- **No `DeleteRenderPreset` in the stub** was assumed — wrongly. The call
+  exists and works; the assumption came from grepping for fewer spellings than
+  the API uses. Call first, then conclude.
+
 ## [1.0.6] — 2026-11-22
 
 ### Fixed

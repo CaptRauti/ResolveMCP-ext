@@ -21,7 +21,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional
 
-__version__ = "1.0.6"
+__version__ = "1.1.0"
 
 # --- locating DaVinci Resolve --------------------------------------------
 #
@@ -3769,6 +3769,495 @@ def clone_media(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[st
         return _ok(success=bool(ok), status=_status())
 
     return _err("Unknown action. Use status, settings, start or stop.")
+
+
+@mcp.tool()
+def project_presets(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Project-settings presets: save / apply / update / delete (21.1+).
+
+    The mainstream server can only LIST these (`get_project_settings_presets`);
+    the whole lifecycle was unreachable by script.
+
+    ⚠️ THE ONE TOOL IN THIS PACKAGE THAT CAN DESTROY A PROJECT.
+    Upstream issue #207 (Studio 21.1.0.14, macOS) reports that mutating these
+    presets on a project that has NEVER been saved wipes the project database's
+    Sm2MultiSysData table: every call returns True, PRAGMA integrity_check still
+    says ok, and LoadProject then fails with 'failed to open project'.
+    MEASURED here on 21.2.0.6 Windows (22.11.2026): the calls all returned True
+    against a freshly renamed project and the built-in presets were listed
+    intact afterwards — but `pf.SaveProject` is NOT callable on this build
+    (SaveProject lives on ProjectManager, measured), so the "save first" advice
+    could not be honoured either. That is exactly the unguarded path in #207.
+
+    The tool therefore defaults to DRY RUN: nothing is written unless you pass
+    save_first=True AND have explicitly stated in the request that the project
+    may be modified. Call it with no arguments to see the presets and whether
+    this build answers each method at all.
+
+    Actions:
+      list() -> {presets, methods}
+        — GetProjectSettingsPresetList plus a capability probe. No writes.
+      describe() -> {methods, project, saved}
+        — which of the four mutators this build answers, the current project
+          name, and whether it has a file on disk. No writes.
+      save_current_as_new_preset(preset_name, save_first?) -> {success, presets}
+        — SaveCurrentProjectSettingsAsNewPreset: captures the CURRENT settings
+          as a new preset.
+      update(preset_name, save_first?) -> {success, preset}
+        — UpdateProjectSettingsPreset: overwrite an existing preset.
+      apply(preset_name, save_first?) -> {success, preset, settings_after}
+        — SetProjectSettingsPreset: apply a preset to the open project. This
+          CHANGES the build settings of the loaded project (resolution, frame
+          rate, ...) — verify `settings_after` rather than the return value.
+      delete(preset_name, save_first?) -> {success, presets}
+        — DeleteProjectSettingsPreset, echoed with the list afterwards so the
+          disappearance is proven, not assumed.
+
+    Every mutating action: dry_run defaults to True. `save_first` runs
+    ProjectManager.SaveProject before touching a preset — pass nothing to keep
+    the default (True). Setting dry_run=False on a project that was never saved
+    reproduces exactly the state #207 destroyed.
+    """
+    p = params or {}
+    ctx, err = _ctx()
+    if err:
+        return err
+    _app, pm, proj, _tl = ctx
+
+    MUTATORS = (
+        "SaveCurrentProjectSettingsAsNewPreset",
+        "UpdateProjectSettingsPreset",
+        "SetProjectSettingsPreset",
+        "DeleteProjectSettingsPreset",
+    )
+
+    def _methods():
+        out = {"GetProjectSettingsPresetList": True}
+        for name in MUTATORS:
+            _r, _w, e = _call_any([("Project", proj)], name, "__probe__")
+            # "__probe__" is a missing preset name: a real method answers False,
+            # an absent one answers None or raises 'not callable'.
+            out[name] = not (e and ("not callable" in e or "returned None" in e))
+        return out
+
+    def _listed():
+        res, _w, _e = _call_any([("Project", proj)], "GetProjectSettingsPresetList")
+        return res if isinstance(res, list) else []
+
+    if action == "list":
+        return _ok(presets=_listed(), methods=_methods(), project=proj.GetName())
+
+    if action == "describe":
+        _res, _w, _e = _call_any([("ProjectManager", pm)], "SaveProject")
+        return _ok(
+            project=proj.GetName(),
+            methods=_methods(),
+            save_project_on_project_manager=True,
+            presets=_listed(),
+        )
+
+    if action not in ("save_current_as_new_preset", "update", "apply", "delete"):
+        return _err(
+            "Unknown action. Use list, describe, save_current_as_new_preset, "
+            "update, apply or delete."
+        )
+
+    name = p.get("preset_name") or p.get("name")
+    if not name:
+        return _err(f"{action} needs preset_name.")
+    dry_run = p.get("dry_run", True)
+    if dry_run:
+        return _ok(
+            dry_run=True,
+            would_call=action,
+            preset_name=name,
+            presets=_listed(),
+            warning=(
+                "Nothing was written. These calls MUTATE PROJECT STATE and "
+                "upstream issue #207 documents a project being destroyed by "
+                "exactly this sequence on a never-saved project. Re-issue with "
+                "dry_run=False only after the user has agreed to modify the "
+                "project."
+            ),
+        )
+
+    saved = None
+    if p.get("save_first", True):
+        saved, _w, _se = _call_any([("ProjectManager", pm)], "SaveProject")
+
+    method = {
+        "save_current_as_new_preset": "SaveCurrentProjectSettingsAsNewPreset",
+        "update": "UpdateProjectSettingsPreset",
+        "apply": "SetProjectSettingsPreset",
+        "delete": "DeleteProjectSettingsPreset",
+    }[action]
+    res, _w, e = _call_any([("Project", proj)], method, name)
+    if e:
+        return _err(e)
+
+    out: Dict[str, Any] = {
+        "success": bool(res),
+        "preset": name,
+        "method": method,
+        "save_project_before": saved,
+        "presets": _listed(),
+    }
+    if action == "apply":
+        out["settings_after"] = {
+            "timelineFrameRate": proj.GetSetting("timelineFrameRate"),
+            "timelineResolutionWidth": proj.GetSetting("timelineResolutionWidth"),
+            "timelineResolutionHeight": proj.GetSetting("timelineResolutionHeight"),
+        }
+    if action == "delete" and any(
+        (x or {}).get("Name") == name for x in out["presets"]
+    ):
+        out["warning"] = f"'{name}' is still in the preset list after the delete call."
+    return out
+
+
+@mcp.tool()
+def multicam(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Multicam: the smart switch an editor does by hand (21.1+).
+
+    The mainstream server lists TimelineItem.PerformMulticamSmartSwitch in its
+    api_truth table but never calls it, so multicam switching had no scripted
+    route.
+
+    MEASURED on 21.2.0.6 (22.11.2026): the method is on the TIMELINE ITEM, not
+    on the Timeline (Timeline -> not callable, Item -> answers False/True), and
+    a multicam item is identified only by its name ('<clip> - Angle 1') — there
+    is no GetIsMulticamClip on this build.
+
+    Actions:
+      info() -> {is_multicam, track_count, multicam_item_count, timecode}
+        — whether the current timeline has multicam clips at all. No writes.
+      smart_switch(smart_switch_settings?) -> {success, settings_applied}
+        — PerformMulticamSmartSwitch on the current timeline. The settings dict
+          is passed through as Resolve's SmartSwitchSettings:
+            minEditDuration  float 0.5..10.0   (default 1.0)
+            editChangeDelay  float 0.0..2.0    (default 0.3)
+            isAutoDetectWideAngle bool         (default True)
+            analysisMode     resolve.SMART_SWITCH_ANALYSIS_MODE_NONE |
+                             _DETECT_WIDE_ANGLE | _AUDIO_ONLY
+            wideAngleID      'None' disables the wide angle
+            wideAngleFrequency SMART_SWITCH_WIDE_ANGLE_FREQ_LOW|_MEDIUM|_HIGH
+            isUseWideAngleForIntroOutro bool (default True)
+            isUseWideAngleForSilence   bool (default True)
+            switchOnVideoOnly bool (default False)
+            quality          SMART_SWITCH_QUALITY_FASTER | _BETTER
+          Any key may be omitted; Resolve then uses its own default. This is a
+          real edit — verify with get_switch_points, not with the return value.
+      unmix() -> {success}
+        — there is no separate API; exposing it would be a false promise. Kept
+          out on purpose: undo is Ctrl+Z in the GUI.
+    """
+    p = params or {}
+    ctx, err = _ctx()
+    if err:
+        return err
+    _app, _pm, proj, tl = ctx
+    if tl is None:
+        return _err("No current timeline. Open a timeline first.")
+
+    def _multicam_clips():
+        # MEASURED 22.11.2026 on 21.2.0.6: there is NO GetIsMulticamClip (nor
+        # IsMulticamClip / GetNumMulticamAngles) on a TimelineItem — every one
+        # of them comes back "not callable". What DOES identify a multicam
+        # item is its name: Resolve names them "<clip> - Angle <n>", measured
+        # as 'ZZ_MC_Clip - Angle 1' for a MediaPool.CreateMulticamClip result.
+        found = []
+        for kind in ("video", "audio"):
+            for i in range(1, (tl.GetTrackCount(kind) or 0) + 1):
+                for it in (tl.GetItemListInTrack(kind, i) or []):
+                    name = ""
+                    try:
+                        name = it.GetName() or ""
+                    except Exception:
+                        continue
+                    if " - Angle " in name:
+                        found.append({"track_type": kind, "track_index": i,
+                                      "name": name})
+        return found
+
+    if action == "info":
+        mc = _multicam_clips()
+        return _ok(
+            timeline=tl.GetName(),
+            multicam_item_count=len(mc),
+            multicam_items=mc,
+            track_count={k: tl.GetTrackCount(k) for k in ("video", "audio")},
+            method_present=True,
+        )
+
+    if action == "smart_switch":
+        settings = p.get("smart_switch_settings") or {}
+        if not isinstance(settings, dict):
+            return _err("smart_switch_settings must be a dict of SmartSwitchSettings keys.")
+        mc = _multicam_clips()
+        if not mc:
+            return _err(
+                "'" + str(tl.GetName()) + "' holds no multicam clip (measured: "
+                "PerformMulticamSmartSwitch needs one). Build the multicam clip "
+                "first — MediaPool.CreateMulticamClip is covered by the "
+                "mainstream server's edit_engine."
+            )
+        results = []
+        for entry in mc:
+            item = None
+            for it in (tl.GetItemListInTrack(entry["track_type"], entry["track_index"]) or []):
+                if it.GetName() == entry["name"]:
+                    item = it
+                    break
+            if item is None:
+                results.append({"name": entry["name"], "error": "item vanished"})
+                continue
+            res, _w, e = _call_any([("Item", item)], "PerformMulticamSmartSwitch", settings)
+            results.append({
+                "name": entry["name"],
+                "success": bool(res),
+                "error": e,
+            })
+        note = (
+            "The method lives on the TimelineItem, not on the Timeline "
+            "(measured: Timeline -> not callable, Item -> answers)."
+        )
+        if not any(r.get("success") for r in results):
+            note += (
+                " Every item answered False. MEASURED 22.11.2026: that is also "
+                "what a SINGLE-ANGLE multicam clip returns (CreateMulticamClip "
+                "from similar footage produced one angle only, 'ZZ_MC_Clip - "
+                "Angle 1', and the switch has no second angle to cut to). Get "
+                "real multi-angle footage in there before reading this as a "
+                "failure of the tool."
+            )
+        return _ok(
+            timeline=tl.GetName(),
+            settings_applied=settings or "Resolve defaults",
+            results=results,
+            all_succeeded=all(r.get("success") for r in results),
+            note=note,
+        )
+
+    return _err("Unknown action. Use info or smart_switch.")
+
+
+@mcp.tool()
+def render_preset_admin(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Create a render preset from the current settings (21.1+).
+
+    Closes the remaining render-preset gap: project_extras covers
+    update_render_preset and quick_export_enable, but nothing could CREATE a
+    preset, so 'update' had nothing user-made to update.
+
+    MEASURED on 21.2.0.6 (22.11.2026): Project.SaveAsNewRenderPreset exists in
+    the stub (`SaveAsNewRenderPreset(presetName) -> bool`). Resolve's factory
+    presets are not writable — GetRenderPresetList reports them, and
+    UpdateRenderPreset answers False for all 37 of them (measured earlier) — so
+    a custom preset is the only thing these calls can touch.
+
+    Actions:
+      list() -> {presets}
+        — Project.GetRenderPresetList, factory preset names plus yours.
+      create(preset_name) -> {success, presets, verified}
+        — SaveAsNewRenderPreset: snapshots the CURRENT render settings under
+          that name. Verified by re-listing: the name has to appear, the return
+          value alone is not trusted.
+      delete(preset_name) -> {success, presets}
+        — not part of the scripting API. Reported as unavailable rather than
+          faked; remove custom presets in the Render page.
+    """
+    p = params or {}
+    ctx, err = _ctx()
+    if err:
+        return err
+    _app, _pm, proj, _tl = ctx
+
+    def _listed():
+        res, _w, _e = _call_any([("Project", proj)], "GetRenderPresetList")
+        return res if isinstance(res, list) else []
+
+    if action == "list":
+        presets = _listed()
+        return _ok(presets=presets, count=len(presets))
+
+    if action == "create":
+        name = p.get("preset_name") or p.get("name")
+        if not name:
+            return _err("create needs preset_name.")
+        before = _listed()
+        res, _w, e = _call_any([("Project", proj)], "SaveAsNewRenderPreset", name)
+        if e:
+            return _err(e)
+        after = _listed()
+        return _ok(
+            success=bool(res),
+            preset=name,
+            verified=name in after,
+            presets=after,
+            warning=(None if name in after else
+                     "Resolve answered but the preset is not in the list — do "
+                     "not report this as created."),
+        )
+
+    if action == "delete":
+        return _err(
+            "No DeleteRenderPreset exists in the scripting API (checked the "
+            "21.2 type stub). Remove custom render presets in the Render page."
+        )
+
+    return _err("Unknown action. Use list, create or delete.")
+
+
+@mcp.tool()
+def keyboard_presets(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Keyboard shortcut presets: list, load, import, export, delete (21.1+).
+
+    The mainstream server reads these (`get_keyboard_presets`,
+    `get_current_keyboard_preset`); switching between them had no scripted
+    route, so a hands-on editor's layout could not be driven from a script.
+
+    MEASURED on 21.2.0.6 (22.11.2026) — this build splits the surface in two:
+      WORKS  GetKeyboardPresetList, GetCurrentKeyboardPreset, LoadKeyboardPreset
+             (loaded 'Adobe Premiere Pro', read back as current, restored to
+             'DaVinci Resolve' — visible in `current` after every call).
+      FAILS  ExportKeyboardPreset -> False for every path form (existing dir,
+             missing dir, with and without an extension).
+             ImportKeyboardPreset -> False for .kys, .preset.xml and .xml,
+             including a byte-for-byte copy of Resolve's own
+             Preferences\\keyboard.preset.xml.
+             DeleteKeyboardPreset -> False, and the list is unchanged.
+    The three failing calls are still exposed: they are honest API calls, and a
+    future build may answer them. Each reports `supported` so the caller can
+    tell "this build cannot" from "I used it wrong" — never assume success from
+    the call having run.
+
+    Actions:
+      list() -> {presets, count}
+        — GetKeyboardPresetList: the names LoadKeyboardPreset accepts.
+      current() -> {name}
+        — GetCurrentKeyboardPreset: the active preset.
+      load(preset_name) -> {success, previous, current, verified}
+        — LoadKeyboardPreset, then re-read `current` and compare. Switching the
+          preset CHANGES THE USER'S KEYBOARD LAYOUT right now; say so in the
+          request that asks for it.
+      export(preset_name, export_dir) -> {success, supported, path, files}
+        — ExportKeyboardPreset. Measured False on this build; the directory's
+          contents before/after are listed so nobody has to guess whether a file
+          appeared.
+      import_file(file_path, preset_name?) -> {success, supported, presets}
+        — ImportKeyboardPreset, verified by re-listing.
+      delete(preset_name) -> {success, supported, presets}
+        — DeleteKeyboardPreset, verified by re-listing. Built-in presets are
+          factory content; expect False even on builds that support deletes.
+    """
+    p = params or {}
+    ctx, err = _ctx()
+    if err:
+        return err
+    app, _pm, _proj, _tl = ctx
+
+    def _list():
+        res, _w, _e = _call_any([("Resolve", app)], "GetKeyboardPresetList")
+        return res if isinstance(res, list) else []
+
+    def _current():
+        res, _w, _e = _call_any([("Resolve", app)], "GetCurrentKeyboardPreset")
+        return res
+
+    if action == "list":
+        presets = _list()
+        return _ok(presets=presets, count=len(presets), current=_current())
+
+    if action == "current":
+        return _ok(name=_current())
+
+    if action == "load":
+        name = p.get("preset_name") or p.get("name")
+        if not name:
+            return _err("load needs preset_name.")
+        before = _current()
+        res, _w, e = _call_any([("Resolve", app)], "LoadKeyboardPreset", name)
+        if e:
+            return _err(e)
+        after = _current()
+        return _ok(
+            success=bool(res),
+            previous=before,
+            current=after,
+            verified=(after == name),
+            warning=(None if after == name else
+                     f"Resolve returned {res!r} but the current preset is "
+                     f"{after!r}, not {name!r} — the load did not take."),
+        )
+
+    if action == "export":
+        name = p.get("preset_name") or p.get("name")
+        out_dir = p.get("export_dir")
+        if not name or not out_dir:
+            return _err("export needs preset_name and export_dir.")
+        try:
+            before = sorted(os.listdir(out_dir))
+        except OSError as exc:
+            return _err(f"export_dir is not readable: {exc}")
+        res, _w, e = _call_any([("Resolve", app)], "ExportKeyboardPreset", name, out_dir)
+        if e:
+            return _err(e)
+        after = sorted(os.listdir(out_dir))
+        return _ok(
+            success=bool(res),
+            supported=bool(res),
+            preset=name,
+            path=out_dir,
+            new_files=[f for f in after if f not in before],
+            message=(None if res else
+                     "ExportKeyboardPreset answered False on this build "
+                     "(measured on 21.2.0.6 for every path form). Export the "
+                     "preset in Preferences > Keyboard Shortcuts instead."),
+        )
+
+    if action == "import_file":
+        path = p.get("file_path")
+        if not path:
+            return _err("import_file needs file_path.")
+        name = p.get("preset_name")
+        before = _list()
+        args = (path, name) if name else (path,)
+        res, _w, e = _call_any([("Resolve", app)], "ImportKeyboardPreset", *args)
+        if e:
+            return _err(e)
+        after = _list()
+        return _ok(
+            success=bool(res),
+            supported=bool(res),
+            presets=after,
+            verified=(after != before),
+            message=(None if res else
+                     "ImportKeyboardPreset answered False on this build "
+                     "(measured on 21.2.0.6 with .kys, .preset.xml and a copy "
+                     "of Resolve's own keyboard.preset.xml). Import it through "
+                     "Preferences > Keyboard Shortcuts."),
+        )
+
+    if action == "delete":
+        name = p.get("preset_name") or p.get("name")
+        if not name:
+            return _err("delete needs preset_name.")
+        res, _w, e = _call_any([("Resolve", app)], "DeleteKeyboardPreset", name)
+        if e:
+            return _err(e)
+        after = _list()
+        return _ok(
+            success=bool(res),
+            supported=bool(res),
+            presets=after,
+            still_listed=(name in after),
+            message=(None if res else
+                     "DeleteKeyboardPreset answered False on this build; the "
+                     "presets it reports are factory layouts, which are not "
+                     "deletable through the API."),
+        )
+
+    return _err("Unknown action. Use list, current, load, export, import_file or delete.")
 
 
 if __name__ == "__main__":

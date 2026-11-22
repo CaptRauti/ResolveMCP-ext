@@ -56,7 +56,8 @@ if tools:
                 "photo_albums", "node_graph", "project_extras",
                 "camera_comparison", "clip_position", "thumbnails",
                 "auto_color", "cdl", "jobs", "clone_media",
-                "resolve_ext_status"}
+                "project_presets", "multicam", "render_preset_admin",
+                "keyboard_presets", "resolve_ext_status"}
     missing = expected - set(tools)
     extra = set(tools) - expected
     check(f"{len(tools)} Tools registriert (erwartet {len(expected)})",
@@ -67,7 +68,7 @@ else:
     # Fallback: die Dekoratoren im Quelltext zaehlen
     src = open(os.path.join(ROOT, "server.py"), encoding="utf-8").read()
     n = src.count("@mcp.tool()")
-    check(f"{n} @mcp.tool-Dekoratoren im Quelltext", n == 15, str(n))
+    check(f"{n} @mcp.tool-Dekoratoren im Quelltext", n == 19, str(n))
 
 print("\n=== 4. CLI ===")
 import io
@@ -214,8 +215,8 @@ try:
           _info.get("name") == "ResolveMCP-ext", str(_info.get("name")))
     check("serverInfo traegt eine Version (nicht leer wie mcp 2.x ohne version=)",
           bool(_info.get("version")), str(_info.get("version")))
-    check(f"tools/list liefert 15 Tools (SDK {getattr(server, 'SDK_MAJOR', '?')})",
-          len(_names) == 15, str(_names))
+    check(f"tools/list liefert 19 Tools (SDK {getattr(server, 'SDK_MAJOR', '?')})",
+          len(_names) == 19, str(_names))
 except Exception as exc:  # pragma: no cover
     check("stdio-Handshake laeuft", False, f"{type(exc).__name__}: {exc}")
 finally:
