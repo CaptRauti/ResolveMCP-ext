@@ -296,6 +296,78 @@ finally:
     server._RESOLVE = _saved
 
 
+print("\n=== 10b. Parameter-Vorpruefung (jedes Tool, ohne Resolve) ===")
+# Why this exists: the v1.1.1 defect (resolve_ext_status declared without
+# action/params) stayed green because the suite called tools DIRECTLY and never
+# on the path a foreign caller takes. Same blind spot here - a tool that dies
+# with ValueError/AttributeError on a bad parameter returns no answer at all,
+# it raises, and the caller sees a transport error instead of a message. So
+# every tool is driven through its real signature with hostile params, with
+# Resolve forced absent: the pre-flight must answer, never raise.
+_saved_connect = server._connect
+_saved_resolve = server._RESOLVE
+server._connect = lambda: None
+server._RESOLVE = None
+try:
+    _hostile = [
+        ("params=[] (kein Objekt)", "info", []),
+        ('params="x" (kein Objekt)', "info", "x"),
+        ("track_index='one'", "info", {"track_index": "one"}),
+        ("track_index='' (leer)", "info", {"track_index": ""}),
+        ("track_index=True", "info", {"track_index": True}),
+        ("track_index=0", "info", {"track_index": 0}),
+        ("track_index=-2", "info", {"track_index": -2}),
+        ("track_index=1.5", "info", {"track_index": 1.5}),
+        ("track_type='Video'", "info", {"track_type": "Video"}),
+        ("node_index='zwei'", "label", {"node_index": "zwei"}),
+        ("frame_offset='x'", "timeline", {"frame_offset": "x"}),
+        ("start_frame='abc'", "set", {"start_frame": "abc"}),
+    ]
+    _raised, _silent, _checked = [], [], 0
+    for _tool in sorted(expected):
+        _fn = getattr(server, _tool, None)
+        if _fn is None or _tool == "resolve_ext_status":
+            continue
+        for _label, _act, _prm in _hostile:
+            _checked += 1
+            try:
+                _res = _fn(action=_act, params=_prm)
+            except Exception as _exc:  # noqa: BLE001 - that is the defect
+                _raised.append(f"{_tool}/{_label}: {type(_exc).__name__}: {_exc}")
+                continue
+            if not isinstance(_res, dict) or not _res.get("error"):
+                _silent.append(f"{_tool}/{_label}: {_res!r}")
+    check(f"{_checked} feindliche Parameter-Aufrufe werfen keine Exception",
+          not _raised, "; ".join(_raised[:4]))
+    check("jeder feindliche Aufruf liefert {'error': ...} statt Erfolg",
+          not _silent, "; ".join(_silent[:4]))
+
+    # The useful answers must survive: a numeric string is still accepted,
+    # and a well-formed call reaches the connection gate, not the param gate.
+    _good = server.clip_position(action="get", params={"track_index": "2"})
+    check("numerischer String wird weiter akzeptiert (kein Param-Fehler)",
+          isinstance(_good, dict) and "Parameter 'track_index'" not in
+          str(_good.get("error", "")), str(_good)[:120])
+    check("gueltiger Aufruf erreicht das Verbindungs-Gate",
+          isinstance(_good, dict) and "Not connected" in str(_good.get("error", "")),
+          str(_good)[:120])
+
+    # _num directly: the coercion contract the tools rely on.
+    check("_num('3') -> 3", server._num({"x": "3"}, "x") == 3)
+    check("_num(3.0) -> 3.0", server._num({"x": 3.0}, "x") == 3.0)
+    check("_num(None, default=1) -> 1", server._num({"x": None}, "x", 1) == 1)
+    check("_num(fehlt, default=1) -> 1", server._num({}, "x", 1) == 1)
+    for _bad in ("one", "", True, [1], {"a": 1}):
+        try:
+            server._num({"x": _bad}, "x")
+            check(f"_num({_bad!r}) wird abgelehnt", False)
+        except server._ParamError:
+            check(f"_num({_bad!r}) wird abgelehnt", True)
+finally:
+    server._connect = _saved_connect
+    server._RESOLVE = _saved_resolve
+
+
 print("\n=== 11. Alle Quelldateien parsen ===")
 for base, _dirs, files in os.walk(ROOT):
     if ".git" in base or "__pycache__" in base:

@@ -4,6 +4,39 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] — 2026-11-23
+
+### Fixed
+
+- **A bad numeric parameter no longer kills the tool call with a traceback.**
+  Every tool read frame and track numbers as `int(p.get("track_index", 1))`.
+  A model that sends `{"track_index": "1"}` was fine, but `"one"`, `""`, `true`
+  or `[1]` raised `ValueError: invalid literal for int()` from inside the tool —
+  the caller got a transport error and no message. Measured on the previous
+  release against a connected project: `clip_position(action="get",
+  params={"track_index": "one"})` → `ValueError`. The same call now answers
+  `{"error": "Parameter 'track_index' must be a number, got 'one'. Send it as a
+  JSON number or a numeric string."}`
+- **`params` that is not an object is refused up front.** `params=[]` or
+  `params="x"` used to fail on the first `p.get` with `AttributeError`; it now
+  returns an error naming the expected shape.
+- **`track_index` below 1 and an unknown `track_type` are refused instead of
+  silently addressing nothing.** `track_index: 0` reached
+  `GetItemListInTrack("video", 0)`, which returns an empty list — that reads
+  like "the clip is gone", not "you addressed track 0". `track_type: "Video"`
+  (capitalised) was accepted and matched no track at all.
+- **All 19 tools validate before touching Resolve** through one shared
+  `_check_params` / `_num` pair, so the message is identical everywhere and no
+  action can bypass it. `resolve_ext_status` stays exempt — it is the diagnostic
+  that must answer without a connection.
+
+### Tests
+
+- `tests/test_offline.py` §10b drives **every tool through its real signature**
+  with 216 hostile parameter combinations and asserts that none of them raises.
+  This is the blind spot that hid the 1.1.1 defect: the suite called tools
+  directly and never on the path a foreign caller takes.
+
 ## [1.1.1] — 2026-11-22
 
 ### Fixed

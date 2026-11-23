@@ -21,7 +21,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 # --- locating DaVinci Resolve --------------------------------------------
 #
@@ -364,6 +364,94 @@ def _ok(**kw) -> Dict[str, Any]:
     return {"success": True, **kw}
 
 
+_NUMERIC_PARAMS = (
+    "track_index", "start_frame", "new_track_index", "frame_offset",
+    "left", "right", "offset_frames", "node_index", "index", "new_index",
+    "max_dimension", "quality", "stars", "scene_gap_frames", "sync_at",
+)
+
+
+class _ParamError(Exception):
+    """A parameter that cannot be used as given, with the reason spelled out."""
+
+    def __init__(self, key: str, raw: Any):
+        self.key, self.raw = key, raw
+        super().__init__(
+            f"Parameter '{key}' must be a number, got {raw!r}. "
+            "Send it as a JSON number or a numeric string."
+        )
+
+
+def _num(p: Dict[str, Any], key: str, default: Any = None) -> Any:
+    """Read a numeric parameter, accepting a JSON string or a number.
+
+    Every numeric parameter is read inside the tools as
+    ``int(p.get("track_index", 1))``. A model that sends ``{"track_index": "1"}``
+    was fine (MCP arguments often arrive as strings), but a misspelt or empty
+    value (``"one"``, ``""``, ``[1]``) died with a raw ``ValueError: invalid
+    literal for int()`` from deep inside the tool, and the caller got a
+    traceback instead of an answer. This is the one place that turns every one
+    of those into the same refusal.
+    """
+    if key not in p or p.get(key) is None:
+        return default
+    raw = p.get(key)
+    if isinstance(raw, bool):
+        raise _ParamError(key, raw)
+    if isinstance(raw, (int, float)):
+        return raw
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        raise _ParamError(key, raw)
+    return int(value) if value.is_integer() else value
+
+
+def _check_params(tool: str, action: str, p: Any) -> Optional[Dict[str, Any]]:
+    """Pre-flight the parameters every tool shares. Returns an error or None.
+
+    Three inputs used to reach Resolve or the Python builtins unchecked and
+    produced a traceback instead of an answer:
+
+    * ``params`` that is not an object at all (``params=[]``, ``params="x"``) —
+      ``p.get`` then fails with ``AttributeError``;
+    * numeric parameters that cannot be coerced (see ``_num``);
+    * ``track_type``/``track_index`` outside what Resolve accepts — the
+      measured failure mode there is a SILENT empty track list, which reads
+      like "the clip is gone" instead of "you addressed V9 on a one-track
+      timeline".
+
+    Refusing here costs nothing: none of these can succeed further down.
+    """
+    if p is None:
+        return None
+    if not isinstance(p, dict):
+        return _err(
+            f"{tool}(action={action!r}) needs params to be an object (a dict "
+            f"of parameters), got {type(p).__name__}. "
+            'Example: params={"track_index": 1}'
+        )
+    try:
+        for key in _NUMERIC_PARAMS:
+            if key in p:
+                _num(p, key)
+    except _ParamError as exc:
+        return _err(str(exc))
+    tt = p.get("track_type")
+    if tt is not None and tt not in ("video", "audio", "subtitle"):
+        return _err(
+            f"Parameter 'track_type' must be 'video', 'audio' or 'subtitle', "
+            f"got {tt!r}."
+        )
+    ti = _num(p, "track_index")
+    if ti is not None and (not isinstance(ti, int) or ti < 1):
+        return _err(
+            f"Parameter 'track_index' must be a whole number >= 1 "
+            f"(1 is the bottom track), got {p.get('track_index')!r}."
+        )
+    return None
+
+
 def _ctx():
     """Return (resolve, project_manager, project, timeline) or an error dict."""
     app = _connect()
@@ -381,6 +469,68 @@ def _ctx():
         )
     tl = proj.GetCurrentTimeline()
     return (app, pm, proj, tl), None
+
+
+def _project_scope(proj) -> Dict[str, Any]:
+    """What the project itself would lose if this call were made.
+
+    A client driving a server over stdio cannot read our tool descriptions
+    before it decides to call one; it sees a tool named `project_presets` and
+    assumes the name describes the target. That is how Issue #207 lost a real
+    project. So the mutating tools report this on every call, and on dry_run it
+    is the answer: `project`, `is_disposable` (the caller marked the name, e.g.
+    `ZZ_`), `timeline` and the item count per track. Nothing is written here.
+    """
+    out: Dict[str, Any] = {}
+    try:
+        name = proj.GetName()
+        out["project"] = name
+        out["is_disposable"] = str(name).startswith(("ZZ_", "MCP_QA_"))
+    except Exception:
+        pass
+    try:
+        tl = proj.GetCurrentTimeline()
+    except Exception:
+        tl = None
+    if tl is None:
+        out["timeline"] = None
+        return out
+    try:
+        out["timeline"] = tl.GetName()
+        counts = {}
+        for kind in ("video", "audio", "subtitle"):
+            try:
+                n = len(tl.GetItemListInTrack(kind, 1) or [])
+            except Exception:
+                continue
+            if n:
+                counts[kind] = n
+        out["items_track_1"] = counts
+    except Exception:
+        pass
+    return out
+
+
+def _dry_run_response(action: str, scope: Dict[str, Any],
+                      would_write: List[str], risk: str) -> Dict[str, Any]:
+    """The answer to `dry_run=True`: the plan, and nothing else.
+
+    Shaped like project_presets' refusal so a client handles both the same way:
+    success is False, `dry_run` is True, `would_write` names what the real call
+    would touch, `scope` says which project and timeline.
+    """
+    return {
+        "success": False,
+        "dry_run": True,
+        "action": action,
+        "would_write": would_write,
+        "risk": risk,
+        "scope": scope,
+        "note": ("Nothing was changed. Pass dry_run=False (or omit it) to do it "
+                 "for real, and read `scope` first: these actions bind to the "
+                 "CURRENT project and timeline."),
+        **scope,
+    }
 
 
 def _find_item(tl, *, item_id: Optional[str] = None, track_type: str = "video",
@@ -656,6 +806,9 @@ def effects(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, A
     plus the track it sits on. Track defaults are video/1.
     """
     p = params or {}
+    perr = _check_params("effects", action, p)
+    if perr:
+        return perr
     ctx, err = _ctx()
     if err:
         return err
@@ -686,7 +839,7 @@ def effects(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, A
         tl,
         item_id=p.get("item_id"),
         track_type=p.get("track_type", "video"),
-        track_index=int(p.get("track_index", 1)),
+        track_index=_num(p, "track_index", 1),
         name=p.get("name"),
     )
     if ierr:
@@ -831,6 +984,9 @@ def clip_attrs(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str
       - CopyAttributes needs the source and targets on the SAME timeline.
     """
     p = params or {}
+    perr = _check_params("clip_attrs", action, p)
+    if perr:
+        return perr
     ctx, err = _ctx()
     if err:
         return err
@@ -861,7 +1017,7 @@ def clip_attrs(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str
         return _err("No current timeline.")
 
     track_type = p.get("track_type", "video")
-    track_index = int(p.get("track_index", 1))
+    track_index = _num(p, "track_index", 1)
 
     if action == "read":
         item, ierr = _find_item(
@@ -1077,6 +1233,9 @@ def clip_position(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[
     video/1. Frame numbers are absolute timeline frames, not timecode.
     """
     p = params or {}
+    perr = _check_params("clip_position", action, p)
+    if perr:
+        return perr
     ctx, err = _ctx()
     if err:
         return err
@@ -1085,7 +1244,7 @@ def clip_position(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[
         return _err("No current timeline.")
 
     track_type = p.get("track_type", "video")
-    track_index = int(p.get("track_index", 1))
+    track_index = _num(p, "track_index", 1)
 
     def _resolve():
         return _find_item(
@@ -1128,9 +1287,9 @@ def clip_position(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[
             return ierr
         pos: Dict[str, Any] = {}
         if p.get("start_frame") is not None:
-            pos["startFrame"] = float(p["start_frame"])
+            pos["startFrame"] = float(_num(p, "start_frame"))
         if p.get("new_track_index") is not None:
-            pos["trackIndex"] = int(p["new_track_index"])
+            pos["trackIndex"] = int(_num(p, "new_track_index"))
         if not pos:
             return _err("set needs start_frame and/or new_track_index.")
         before = item.GetStart()
@@ -1464,6 +1623,9 @@ def export_frame(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[s
     import base64
 
     p = params or {}
+    perr = _check_params("export_frame", action, p)
+    if perr:
+        return perr
     ctx, err = _ctx()
     if err:
         return err
@@ -1555,7 +1717,7 @@ def export_frame(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[s
         item, ierr = _find_item(
             tl, item_id=p.get("item_id"),
             track_type=p.get("track_type", "video"),
-            track_index=int(p.get("track_index", 1)),
+            track_index=_num(p, "track_index", 1),
             name=p.get("name"),
         )
         if ierr:
@@ -1592,6 +1754,9 @@ def folder_ops(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str
         — locate a clip by id anywhere in the tree.
     """
     p = params or {}
+    perr = _check_params("folder_ops", action, p)
+    if perr:
+        return perr
     ctx, err = _ctx()
     if err:
         return err
@@ -1740,6 +1905,9 @@ def photo_albums(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[s
                  (this tool sets it).
     """
     p = params or {}
+    perr = _check_params("photo_albums", action, p)
+    if perr:
+        return perr
     ctx, err = _ctx()
     if err:
         return err
@@ -2191,6 +2359,9 @@ def node_graph(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str
       reset_grades(...) -> {success}   — destructive: clears the whole grade.
     """
     p = params or {}
+    perr = _check_params("node_graph", action, p)
+    if perr:
+        return perr
     ctx, err = _ctx()
     if err:
         return err
@@ -2242,7 +2413,7 @@ def node_graph(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str
         item, ierr = _find_item(
             tl, item_id=p.get("item_id"),
             track_type=p.get("track_type", "video"),
-            track_index=int(p.get("track_index", 1)),
+            track_index=_num(p, "track_index", 1),
             name=p.get("name"),
         )
         if ierr:
@@ -2469,6 +2640,9 @@ def project_extras(action: str, params: Optional[Dict[str, Any]] = None) -> Dict
     capability here varies by build, so nothing is assumed.
     """
     p = params or {}
+    perr = _check_params("project_extras", action, p)
+    if perr:
+        return perr
     ctx, err = _ctx()
     if err:
         return err
@@ -2776,6 +2950,9 @@ def camera_comparison(action: str, params: Optional[Dict[str, Any]] = None) -> D
     success.
     """
     p = params or {}
+    perr = _check_params("camera_comparison", action, p)
+    if perr:
+        return perr
     ctx, err = _ctx()
     if err:
         return err
@@ -2785,7 +2962,7 @@ def camera_comparison(action: str, params: Optional[Dict[str, Any]] = None) -> D
         return _err("No current timeline.")
 
     track_type = p.get("track_type", "video")
-    track_index = int(p.get("track_index", 1))
+    track_index = _num(p, "track_index", 1)
     res_x, res_y = _timeline_pixels(proj)
 
     def _items():
@@ -3339,6 +3516,9 @@ def thumbnails(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str
     cellHeight}, path|saved_to, bytes}.
     """
     p = params or {}
+    perr = _check_params("thumbnails", action, p)
+    if perr:
+        return perr
     ctx, err = _ctx()
     if err:
         return err
@@ -3357,7 +3537,7 @@ def thumbnails(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str
             return _err("No current timeline.")
         item, ierr = _find_item(tl, item_id=p.get("item_id"),
                                 track_type=p.get("track_type", "video"),
-                                track_index=int(p.get("track_index", 1)),
+                                track_index=_num(p, "track_index", 1),
                                 name=p.get("name"))
         if ierr:
             return ierr
@@ -3451,7 +3631,7 @@ def _grade_target(ctx, p):
         return None, None, _err("No current timeline.")
     obj, ierr = _find_item(tl, item_id=p.get("item_id"),
                            track_type=p.get("track_type", "video"),
-                           track_index=int(p.get("track_index", 1)),
+                           track_index=_num(p, "track_index", 1),
                            name=p.get("name"))
     if ierr:
         return None, None, ierr
@@ -3503,8 +3683,15 @@ def auto_color(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str
       enable | disable(item_id?|name?, …)
         -> {success, changed, auto_color_enabled}
       clear(item_id?|name?, …) -> {success, cleared}
+
+    dry_run=True changes nothing and returns the plan with the project and
+    timeline the call would write to - worth one call when you are not certain
+    which timeline is current.
     """
     p = params or {}
+    perr = _check_params("auto_color", action, p)
+    if perr:
+        return perr
     ctx, err = _ctx()
     if err:
         return err
@@ -3512,6 +3699,13 @@ def auto_color(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str
     obj, label, terr = _grade_target(ctx, p)
     if terr:
         return terr
+
+    if p.get("dry_run"):
+        return _dry_run_response(
+            action, _project_scope(proj),
+            {"apply": ["grade"], "enable": ["auto_color flag"],
+             "disable": ["auto_color flag"], "clear": ["grade"]}.get(action, []),
+            risk="writes a grade on this clip; nothing changes until dry_run is off")
 
     switched_from = _ensure_color_page(app)
     extra = {"page_switched_from": switched_from} if switched_from else {}
@@ -3561,8 +3755,14 @@ def cdl(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     **The Color page must be showing** — on Edit SetCDL returns False and the
     grade is unchanged (measured on 21.2.0.6). This tool switches to Color
     itself and reports `page_switched_from` when it did.
+
+    dry_run=True changes nothing and returns the plan with the project and
+    timeline the call would write to.
     """
     p = params or {}
+    perr = _check_params("cdl", action, p)
+    if perr:
+        return perr
     ctx, err = _ctx()
     if err:
         return err
@@ -3571,6 +3771,11 @@ def cdl(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if terr:
         return terr
     node_index = int(p.get("node_index", 1))
+    if p.get("dry_run"):
+        return _dry_run_response(
+            action, _project_scope(proj),
+            ["CDL on node {}".format(node_index)] if action == "set" else [],
+            risk="overwrites this node's CDL; nothing changes until dry_run is off")
     switched_from = _ensure_color_page(app)
     extra = {"page_switched_from": switched_from} if switched_from else {}
 
@@ -3635,6 +3840,9 @@ def jobs(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]
       render_job(job_id) -> {job_id, status}
     """
     p = params or {}
+    perr = _check_params("jobs", action, p)
+    if perr:
+        return perr
     ctx, err = _ctx()
     if err:
         return err
@@ -3716,6 +3924,9 @@ def clone_media(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[st
         — StopCloneMedia; returns False when no clone job is running.
     """
     p = params or {}
+    perr = _check_params("clone_media", action, p)
+    if perr:
+        return perr
     ctx, err = _ctx()
     if err:
         return err
@@ -3829,6 +4040,9 @@ def project_presets(action: str, params: Optional[Dict[str, Any]] = None) -> Dic
     reproduces exactly the state #207 destroyed.
     """
     p = params or {}
+    perr = _check_params("project_presets", action, p)
+    if perr:
+        return perr
     ctx, err = _ctx()
     if err:
         return err
@@ -3962,6 +4176,9 @@ def multicam(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, 
           out on purpose: undo is Ctrl+Z in the GUI.
     """
     p = params or {}
+    perr = _check_params("multicam", action, p)
+    if perr:
+        return perr
     ctx, err = _ctx()
     if err:
         return err
@@ -4077,6 +4294,9 @@ def render_preset_admin(action: str, params: Optional[Dict[str, Any]] = None) ->
           faked; remove custom presets in the Render page.
     """
     p = params or {}
+    perr = _check_params("render_preset_admin", action, p)
+    if perr:
+        return perr
     ctx, err = _ctx()
     if err:
         return err
@@ -4161,6 +4381,9 @@ def keyboard_presets(action: str, params: Optional[Dict[str, Any]] = None) -> Di
           factory content; expect False even on builds that support deletes.
     """
     p = params or {}
+    perr = _check_params("keyboard_presets", action, p)
+    if perr:
+        return perr
     ctx, err = _ctx()
     if err:
         return err
